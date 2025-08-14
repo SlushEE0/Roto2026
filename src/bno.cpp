@@ -1,11 +1,16 @@
-#include "bno.h"
+#include <bno.h>
+
+static constexpr uint16_t REPORT_INTERVAL_MS = 10; // 100 Hz
+static constexpr float G_TO_MS2 = 9.80665f;
 
 BNO::BNO() {
   isConnected = false;
   sensorsEnabled = false;
 
-  rotationQuat = { 1.0f, 0.0f, 0.0f, 0.0f }; // w, i, j, k
-  rotationEuler = { 0.0f, 0.0f, 0.0f }; // x, y, z
+  accel = { 0.0f, 0.0f, 0.0f };
+  gyro = { 0.0f, 0.0f, 0.0f };
+  rotationQuat = { 1.0f, 0.0f, 0.0f, 0.0f };
+  rotationEuler = { 0.0f, 0.0f, 0.0f };
 }
 
 BNO::~BNO() {
@@ -23,34 +28,11 @@ bool BNO::connect(int csPin, int intPin, int rstPin, unsigned long spiSpeed) {
     Serial.println("[BNO] Failed to connect to BNO08x");
     return false;
   }
-
   isConnected = true;
   Serial.println("[BNO] Connected successfully");
 
-  enableReports();
-  tare();
-
+  init();
   return true;
-}
-
-void BNO::enableReports() {
-  const int MAX_RETRIES = 10;
-
-  // Enable Game Rotation Vector at 100Hz
-  Serial.print("[BNO] Enabling Game Rotation Vector...");
-  bool success = false;
-  for (int i = 0; i < MAX_RETRIES; i++) {
-    if (imu.enableGameRotationVector(10)) { // 10ms = 100Hz
-      Serial.println(" SUCCESS");
-      success = true;
-      break;
-    }
-    Serial.print(".");
-    delay(100);
-  }
-
-  sensorsEnabled = success;
-  delay(100); // Allow sensors to stabilize
 }
 
 void BNO::disconnect() {
@@ -62,21 +44,60 @@ bool BNO::isReady() {
   return isConnected && sensorsEnabled;
 }
 
+void BNO::init() {
+  enableSensors(); // calibrated accel + gyro, 100 Hz
+  tare();
+}
+
+void BNO::enableSensors() {
+  const int MAX_RETRIES = 10;
+  bool successAccel = false, successGyro = false;
+
+  Serial.print("[BNO] Enabling calibrated Accel+Gyro @ ");
+  Serial.print(REPORT_INTERVAL_MS);
+  Serial.println(" ms...");
+
+  for (int i = 0; i < MAX_RETRIES; i++) {
+    // Calibrated reports (NOT raw)
+    if (imu.enableAccelerometer(REPORT_INTERVAL_MS))
+      successAccel = true;
+    if (imu.enableGyro(REPORT_INTERVAL_MS))
+      successGyro = true;
+    if (successAccel && successGyro)
+      break;
+    delay(100);
+  }
+
+  sensorsEnabled = successAccel && successGyro;
+  Serial.println(sensorsEnabled ? "  SUCCESS" : "  FAILED");
+
+  filter.begin(1000.0f / REPORT_INTERVAL_MS);
+
+  delay(100); // let sensors settle
+}
+
 void BNO::updateSensorData() {
+  // Drain all pending reports
   if (imu.getSensorEvent()) {
-    // Get Game Rotation Vector data (quaternion without magnetometer)
-    if (imu.getSensorEventID() == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
-      RotationQuat quat;
+    uint8_t id = imu.getSensorEventID();
 
-      quat.i = imu.getQuatI();
-      quat.j = imu.getQuatJ();
-      quat.k = imu.getQuatK();
-      quat.w = imu.getQuatReal();
-
-      RotationEuler euler = cnv_quatToEuler(quat);
-
-      rotationQuat = quat;
-      rotationEuler = euler;
+    // Calibrated accelerometer → m/s^2
+    if (id == SENSOR_REPORTID_RAW_ACCELEROMETER ||
+        id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
+      float ax_ms2 = imu.getAccelX();
+      float ay_ms2 = imu.getAccelY();
+      float az_ms2 = imu.getAccelZ();
+      // Convert to g for Madgwick
+      accel.x = ax_ms2 / G_TO_MS2;
+      accel.y = ay_ms2 / G_TO_MS2;
+      accel.z = az_ms2 / G_TO_MS2;
+    }
+    // Calibrated gyro → radians/s
+    else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
+             id == SENSOR_REPORTID_RAW_GYROSCOPE) {
+      gyro.x = imu.getGyroX() * (180.0f / PI);
+      gyro.y = imu.getGyroY() * (180.0f / PI);
+      gyro.z = imu.getGyroZ() * (180.0f / PI);
     }
   }
 }
@@ -88,19 +109,34 @@ bool BNO::update() {
     return false;
   }
 
-  // Check for IMU reset
-  if (imu.wasReset()) {
-    Serial.println("[BNO] Reset detected, re-enabling reports");
-    enableReports();
+  if (imu.wasReset() && millis() > 2000) {
+    Serial.println("[BNO] Reset detected, re-enabling sensors");
+    enableSensors();
     return false;
   }
 
   updateSensorData();
 
+  // Feed Madgwick: gyro in rad/s, accel in g
+  filter.updateIMU(gyro.x, gyro.y, gyro.z, accel.x, accel.y, accel.z);
+
+  RotationEuler filtered = {
+    .x = filter.getRoll(), // degrees
+    .y = filter.getPitch(), // degrees
+    .z = filter.getYaw() // degrees
+  };
+  setRotation(filtered);
   return true;
 }
 
-RotationEuler BNO::getRotation() {
+void BNO::setRotation(RotationEuler rotation) {
+  rotationEuler = rotation;
+  rotationQuat = cnv_eulerToQuat(&rotation);
+}
+
+void BNO::setRotation(RotationQuat rotation) { /* optional */ }
+
+RotationEuler BNO::getRotationEuler() {
   return rotationEuler;
 }
 
@@ -108,10 +144,16 @@ RotationQuat BNO::getRotationQuat() {
   return rotationQuat;
 }
 
-void BNO::tare() {
-  if (isReady()) {
-    imu.tareNow();
+AccelData BNO::getAccelData() {
+  return accel;
+}
 
-    Serial.println("[BNO] Tare completed");
-  }
+GyroData BNO::getGyroData() {
+  return gyro;
+}
+
+void BNO::tare() {
+  // Reset orientation estimate. (Re-seeds internal timing too.)
+  filter.begin(1000.0f / REPORT_INTERVAL_MS);
+  Serial.println("[BNO] Tare completed");
 }

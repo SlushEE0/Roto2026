@@ -18,7 +18,8 @@ inline long cnv_stepsToMM(long steps);
 
 inline long cnv_MMToSteps(long mm);
 
-RotationEuler cnv_quatToEuler(RotationQuat q);
+RotationEuler cnv_quatToEuler(RotationQuat* q);
+RotationQuat cnv_eulerToQuat(RotationEuler* e);
 
 bool clamp(long *value, long min, long max);
 
