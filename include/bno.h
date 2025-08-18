@@ -4,21 +4,8 @@
 #include <Arduino.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
 #include <SPI.h>
-#include <MadgwickAHRS.h>
+#include <kalman.h>
 #include <utils.h>
-
-// Structs for raw sensor data
-struct AccelData {
-  float x; // m/s^2
-  float y;
-  float z;
-};
-
-struct GyroData {
-  float x; // rad/s
-  float y;
-  float z;
-};
 
 class BNO {
 public:
@@ -29,7 +16,7 @@ public:
   connect(int csPin, int intPin, int rstPin, unsigned long spiSpeed = 800000);
   void disconnect();
   bool isReady();
-  bool update();
+  void update();
   void tare();
 
   RotationEuler getRotationEuler();
@@ -57,8 +44,8 @@ private:
   RotationQuat rotationQuat;
   RotationEuler rotationEuler;
 
-  BNO08x imu;
-  Madgwick filter;
+  BNO08x bno;
+  Kalman filter;
 };
 
 #endif

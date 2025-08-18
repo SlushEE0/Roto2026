@@ -1,4 +1,5 @@
 #include <math.h>
+#include <BasicLinearAlgebra.h>
 
 #include <utils.h>
 
@@ -59,9 +60,9 @@ RotationQuat cnv_eulerToQuat(RotationEuler *ptr_r) {
   RotationQuat result;
 
   // Convert degrees to radians and normalize to 0-360 range
-  double roll_rad = fmod(r.x, 360.0) * PI / 180.0;
-  double pitch_rad = fmod(r.y, 360.0) * PI / 180.0;
-  double yaw_rad = fmod(r.z, 360.0) * PI / 180.0;
+  double roll_rad = fmod(r.x + 720.0, 360.0) * PI / 180.0;
+  double pitch_rad = fmod(r.y + 720.0, 360.0) * PI / 180.0;
+  double yaw_rad = fmod(r.z + 720.0, 360.0) * PI / 180.0;
 
   // Calculate half angles
   double cr = cos(roll_rad * 0.5);
@@ -79,6 +80,16 @@ RotationQuat cnv_eulerToQuat(RotationEuler *ptr_r) {
 
   return result;
 };
+
+void normalizeQuat(RotationQuat &q) {
+  double norm = sqrt(q.w * q.w + q.i * q.i + q.j * q.j + q.k * q.k);
+  if (norm > 0.0) {
+    q.w = q.w / norm;
+    q.i = q.i / norm;
+    q.j = q.j / norm;
+    q.k = q.k / norm;
+  }
+}
 
 bool clamp(long *value, long min, long max) {
   if (*value < min) {

@@ -1,16 +1,16 @@
 #include <bno.h>
 
 static constexpr uint16_t REPORT_INTERVAL_MS = 10; // 100 Hz
-static constexpr float G_TO_MS2 = 9.80665f;
+static constexpr float G_TO_MS2 = 9.80665;
 
 BNO::BNO() {
   isConnected = false;
   sensorsEnabled = false;
 
-  accel = { 0.0f, 0.0f, 0.0f };
-  gyro = { 0.0f, 0.0f, 0.0f };
-  rotationQuat = { 1.0f, 0.0f, 0.0f, 0.0f };
-  rotationEuler = { 0.0f, 0.0f, 0.0f };
+  accel = { 0.0, 0.0, 0.0 };
+  gyro = { 0.0, 0.0, 0.0 };
+  rotationQuat = { 1.0, 0.0, 0.0, 0.0 };
+  rotationEuler = { 0.0, 0.0, 0.0 };
 }
 
 BNO::~BNO() {
@@ -24,7 +24,7 @@ bool BNO::connect(int csPin, int intPin, int rstPin, unsigned long spiSpeed) {
 
   Serial.println("[BNO] Connecting to IMU...");
 
-  if (!imu.beginSPI(cs_pin, int_pin, rst_pin, spiSpeed, SPI)) {
+  if (!bno.beginSPI(cs_pin, int_pin, rst_pin, spiSpeed, SPI)) {
     Serial.println("[BNO] Failed to connect to BNO08x");
     return false;
   }
@@ -59,10 +59,11 @@ void BNO::enableSensors() {
 
   for (int i = 0; i < MAX_RETRIES; i++) {
     // Calibrated reports (NOT raw)
-    if (imu.enableAccelerometer(REPORT_INTERVAL_MS))
+    if (bno.enableAccelerometer(REPORT_INTERVAL_MS))
       successAccel = true;
-    if (imu.enableGyro(REPORT_INTERVAL_MS))
+    if (bno.enableGyro(REPORT_INTERVAL_MS))
       successGyro = true;
+
     if (successAccel && successGyro)
       break;
     delay(100);
@@ -71,62 +72,50 @@ void BNO::enableSensors() {
   sensorsEnabled = successAccel && successGyro;
   Serial.println(sensorsEnabled ? "  SUCCESS" : "  FAILED");
 
-  filter.begin(1000.0f / REPORT_INTERVAL_MS);
-
   delay(100); // let sensors settle
 }
 
 void BNO::updateSensorData() {
   // Drain all pending reports
-  if (imu.getSensorEvent()) {
-    uint8_t id = imu.getSensorEventID();
+  if (bno.getSensorEvent()) {
+    uint8_t id = bno.getSensorEventID();
 
     // Calibrated accelerometer → m/s^2
-    if (id == SENSOR_REPORTID_RAW_ACCELEROMETER ||
+    if (id == SENSOR_REPORTID_ACCELEROMETER ||
         id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
-      float ax_ms2 = imu.getAccelX();
-      float ay_ms2 = imu.getAccelY();
-      float az_ms2 = imu.getAccelZ();
-      // Convert to g for Madgwick
-      accel.x = ax_ms2 / G_TO_MS2;
-      accel.y = ay_ms2 / G_TO_MS2;
-      accel.z = az_ms2 / G_TO_MS2;
+      accel.x = bno.getAccelX();
+      accel.y = bno.getAccelY();
+      accel.z = bno.getAccelZ();
     }
     // Calibrated gyro → radians/s
     else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
              id == SENSOR_REPORTID_RAW_GYROSCOPE) {
-      gyro.x = imu.getGyroX() * (180.0f / PI);
-      gyro.y = imu.getGyroY() * (180.0f / PI);
-      gyro.z = imu.getGyroZ() * (180.0f / PI);
+      gyro.x = bno.getGyroX();
+      gyro.y = bno.getGyroY();
+      gyro.z = bno.getGyroZ();
     }
   }
 }
 
-bool BNO::update() {
+void BNO::update() {
   if (!isReady()) {
     Serial.println("[BNO] Not ready - isConnected: " + String(isConnected) +
                    ", sensorsEnabled: " + String(sensorsEnabled));
-    return false;
+    return;
   }
 
-  if (imu.wasReset() && millis() > 2000) {
+  if (bno.wasReset() && millis() > 2000) {
     Serial.println("[BNO] Reset detected, re-enabling sensors");
     enableSensors();
-    return false;
+    return;
   }
 
   updateSensorData();
 
-  // Feed Madgwick: gyro in rad/s, accel in g
-  filter.updateIMU(gyro.x, gyro.y, gyro.z, accel.x, accel.y, accel.z);
+  filter.update(&gyro, &accel);
 
-  RotationEuler filtered = {
-    .x = filter.getRoll(), // degrees
-    .y = filter.getPitch(), // degrees
-    .z = filter.getYaw() // degrees
-  };
+  RotationEuler filtered = filter.getRotationEuler();
   setRotation(filtered);
-  return true;
 }
 
 void BNO::setRotation(RotationEuler rotation) {
@@ -153,7 +142,5 @@ GyroData BNO::getGyroData() {
 }
 
 void BNO::tare() {
-  // Reset orientation estimate. (Re-seeds internal timing too.)
-  filter.begin(1000.0f / REPORT_INTERVAL_MS);
   Serial.println("[BNO] Tare completed");
 }

@@ -1,6 +1,8 @@
 #include <Arduino.h>
 // #include <motor.h>
+#include "utils.h"
 #include <bno.h>
+
 #include <config.h>
 
 // SPI pins for BNO08x
@@ -13,7 +15,7 @@ const int RST_PIN = 31; // Reset pin
 BNO imu;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(250000);
   while (!Serial)
     delay(10);
 
@@ -35,15 +37,19 @@ void setup() {
 }
 
 void loop() {
+  long prevUS = micros();
   imu.update();
   RotationEuler rotation = imu.getRotationEuler();
+  long deltaUS = micros() - prevUS;
 
   Serial.print("[DATA]: X: ");
   Serial.print(rotation.x);
   Serial.print(", Y: ");
   Serial.print(rotation.y);
   Serial.print(", Z: ");
-  Serial.println(rotation.z);
+  Serial.print(rotation.z);
+  Serial.print(", US: ");
+  Serial.println(deltaUS);
 
-  delay(10);
+  delay(100);
 }
