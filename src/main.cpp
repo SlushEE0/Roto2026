@@ -15,7 +15,7 @@ const int RST_PIN = 31; // Reset pin
 BNO imu;
 
 void setup() {
-  Serial.begin(250000);
+  Serial.begin(256000);
   while (!Serial)
     delay(10);
 

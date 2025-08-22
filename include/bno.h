@@ -1,5 +1,4 @@
-#ifndef __BNO_H
-#define __BNO_H
+#pragma once
 
 #include <Arduino.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
@@ -47,5 +46,3 @@ private:
   BNO08x bno;
   Kalman filter;
 };
-
-#endif

@@ -11,6 +11,22 @@ static inline long cnv_MMToSteps(long mm) {
   return mm / MMsPerStep;
 }
 
+RotationEuler Rotation::getEuler() {
+  return cnv_quatToEuler(&rotation);
+}
+
+RotationQuat Rotation::getQuat() {
+  return rotation;
+}
+
+void Rotation::setEuler(RotationEuler *euler) {
+  rotation = cnv_eulerToQuat(euler);
+}
+
+void Rotation::setQuat(RotationQuat *quat) {
+  rotation = *quat;
+}
+
 RotationEuler cnv_quatToEuler(RotationQuat *ptr_r) {
   RotationQuat r = *ptr_r;
   RotationEuler e;

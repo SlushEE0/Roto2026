@@ -1,5 +1,4 @@
-#ifndef __KALMAN_H
-#define __KALMAN_H
+#pragma once
 
 #include "utils.h"
 
@@ -7,7 +6,8 @@ class Kalman {
 public:
   Kalman();
 
-  void update(GyroData *gyroData, AccelData *accelData);
+  void updateWheels(double *yaw);
+  void updateIMU(RotationEuler *rotation);
 
   RotationEuler getRotationEuler();
   RotationQuat getRotationQuat();
@@ -15,5 +15,3 @@ public:
   // Optional external measurement (not used in current file but kept for API)
   // void setMeasurementQuat(const RotationQuat &z);
 };
-
-#endif

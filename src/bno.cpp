@@ -59,10 +59,8 @@ void BNO::enableSensors() {
 
   for (int i = 0; i < MAX_RETRIES; i++) {
     // Calibrated reports (NOT raw)
-    if (bno.enableAccelerometer(REPORT_INTERVAL_MS))
+    if (bno.enableRotationVector(REPORT_INTERVAL_MS))
       successAccel = true;
-    if (bno.enableGyro(REPORT_INTERVAL_MS))
-      successGyro = true;
 
     if (successAccel && successGyro)
       break;
@@ -80,19 +78,24 @@ void BNO::updateSensorData() {
   if (bno.getSensorEvent()) {
     uint8_t id = bno.getSensorEventID();
 
-    // Calibrated accelerometer → m/s^2
-    if (id == SENSOR_REPORTID_ACCELEROMETER ||
-        id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
-      accel.x = bno.getAccelX();
-      accel.y = bno.getAccelY();
-      accel.z = bno.getAccelZ();
-    }
-    // Calibrated gyro → radians/s
-    else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
-             id == SENSOR_REPORTID_RAW_GYROSCOPE) {
-      gyro.x = bno.getGyroX();
-      gyro.y = bno.getGyroY();
-      gyro.z = bno.getGyroZ();
+    // // Calibrated accelerometer → m/s^2
+    // if (id == SENSOR_REPORTID_ACCELEROMETER ||
+    //     id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
+    //   accel.x = bno.getAccelX();
+    //   accel.y = bno.getAccelY();
+    //   accel.z = bno.getAccelZ();
+    // }
+    // // Calibrated gyro → radians/s
+    // else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
+    //          id == SENSOR_REPORTID_RAW_GYROSCOPE) {
+    //   gyro.x = bno.getGyroX();
+    //   gyro.y = bno.getGyroY();
+    //   gyro.z = bno.getGyroZ();
+    // }
+    if (id == SENSOR_REPORTID_ROTATION_VECTOR) {
+      rotationEuler = { .x = bno.getRoll(),
+                        .y = bno.getPitch(),
+                        .z = bno.getYaw() };
     }
   }
 }
@@ -112,7 +115,7 @@ void BNO::update() {
 
   updateSensorData();
 
-  filter.update(&gyro, &accel);
+  filter.updateIMU(&rotationEuler);
 
   RotationEuler filtered = filter.getRotationEuler();
   setRotation(filtered);

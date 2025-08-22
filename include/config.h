@@ -1,5 +1,4 @@
-#ifndef __CONFIG_H
-#define __CONFIG_H
+#pragma once
 
 #define X_STEP_PIN 54
 #define X_DIR_PIN 55
@@ -24,5 +23,3 @@
 
 #define MOTOR_MAX_ACCEL 36000 // steps/sec^2
 #define MOTOR_MAX_SPEED 28000  // steps/sec
-
-#endif

@@ -1,5 +1,4 @@
-#ifndef __UTILS_H
-#define __UTILS_H
+#pragma once
 
 #include <Arduino.h>
 #include <config.h>
@@ -10,11 +9,26 @@ typedef struct {
   double w, i, j, k;
 } RotationQuat;
 
+// rads
 typedef struct {
   double x, // roll
-    y,      // pitch
-    z;      // yaw
+    y, // pitch
+    z; // yaw
 } RotationEuler;
+
+RotationEuler cnv_quatToEuler(RotationQuat *q);
+RotationQuat cnv_eulerToQuat(RotationEuler *e);
+
+class Rotation {
+public:
+  RotationQuat rotation;
+
+  RotationEuler getEuler();
+  RotationQuat getQuat();
+
+  void setQuat(RotationQuat *quat);
+  void setEuler(RotationEuler *euler);
+};
 
 // m/s^2
 typedef struct {
@@ -32,11 +46,6 @@ inline long cnv_stepsToMM(long steps);
 
 inline long cnv_MMToSteps(long mm);
 
-RotationEuler cnv_quatToEuler(RotationQuat *q);
-RotationQuat cnv_eulerToQuat(RotationEuler *e);
-
 void normalizeQuat(RotationQuat &q);
 
 bool clamp(long *value, long min, long max);
-
-#endif
