@@ -1,10 +1,7 @@
 #pragma once
 
-#include <Arduino.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
-#include <SPI.h>
 #include <kalman.h>
-#include <utils.h>
 
 class BNO {
 public:
@@ -18,8 +15,7 @@ public:
   void update();
   void tare();
 
-  RotationEuler getRotationEuler();
-  RotationQuat getRotationQuat();
+  Rotation *getRotation();
   AccelData getAccelData();
   GyroData getGyroData();
 
@@ -28,8 +24,7 @@ private:
   void enableSensors();
   void updateSensorData();
 
-  void setRotation(RotationEuler rotation);
-  void setRotation(RotationQuat rotation);
+  void setRotation(Rotation *rotation);
 
   int cs_pin;
   int int_pin;
@@ -40,8 +35,7 @@ private:
 
   AccelData accel;
   GyroData gyro;
-  RotationQuat rotationQuat;
-  RotationEuler rotationEuler;
+  Rotation rotation;
 
   BNO08x bno;
   Kalman filter;

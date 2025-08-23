@@ -1,19 +1,20 @@
 #pragma once
-
 #include <Arduino.h>
 
 class Stepper {
 public:
+  // Pass enablePin as optional; set to 255 if unused
   Stepper(uint8_t stepPin, uint8_t dirPin, uint8_t enablePin = 255);
 
-  void setSpeed(long stepsPerSec); // set constant speed
-  void moveTo(long absolute); // set target absolute position
+  void setSpeed(long stepsPerSec); // constant speed
+  void moveTo(long absolute); // absolute move
   void move(long relative); // relative move
   long currentPosition(); // get current steps
-  bool isBusy(); // still moving?
-
+  bool isBusy(); // is motor still moving?
   void enable();
   void disable();
+
+  void reverse(); // reverse motion direction
 
   // internal: called from ISR
   void stepService();
@@ -26,5 +27,5 @@ private:
   volatile unsigned long _lastStepMicros = 0;
   volatile bool _dir = true;
 
-  friend void stepperISR(); // allow ISR access
+  friend void stepperISR();
 };

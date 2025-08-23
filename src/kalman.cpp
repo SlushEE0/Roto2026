@@ -74,11 +74,4 @@ void Kalman::updateIMU(RotationEuler *rotation) {
   currRotation.y = 0.0;
 }
 
-// ---- Accessors ----
-RotationEuler Kalman::getRotationEuler() {
-  return currRotation;
-}
 
-RotationQuat Kalman::getRotationQuat() {
-  return cnv_eulerToQuat(&currRotation);
-}

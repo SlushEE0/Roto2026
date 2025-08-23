@@ -1,7 +1,8 @@
 #include <Arduino.h>
-// #include <motor.h>
-#include "utils.h"
+#include <ArduinoLog.h>
+#include <stepper.h>
 #include <bno.h>
+#include <utils.h>
 
 #include <config.h>
 
@@ -10,46 +11,54 @@ const int CS_PIN = 53; // CS (Chip Select)
 const int INT_PIN = 33; // Interrupt pin
 const int RST_PIN = 31; // Reset pin
 
-// Motor stepper_r;
-// Motor stepper_l;
+Stepper stepper_r(Y_STEP_PIN, Y_DIR_PIN, Y_ENABLE_PIN);
+Stepper stepper_l(Z_STEP_PIN, Z_DIR_PIN, Z_ENABLE_PIN);
 BNO imu;
 
 void setup() {
   Serial.begin(256000);
-  while (!Serial)
+  while(!Serial)
     delay(10);
 
-  Serial.println("[INIT] Roto2026 Starting");
-  Serial.println("=========================");
+  Log.begin(LOG_LEVEL_VERBOSE, &Serial);
 
-  // Initialize motors
-  // stepper_r.connect(Y_DIR_PIN, Y_STEP_PIN, Y_ENABLE_PIN, false);
-  // stepper_l.connect(Z_DIR_PIN, Z_STEP_PIN, Z_ENABLE_PIN, false);
+  Log.noticeln("[INIT] Roto2026 Starting");
+  Log.noticeln("=========================");
 
   // Initialize IMU
   while (!imu.connect(CS_PIN, INT_PIN, RST_PIN)) {
-    Serial.println("[INIT] Retrying BNO connection...");
+    Log.infoln("[INIT] Retrying BNO connection...");
     delay(2000);
   }
 
-  Serial.println("[INIT] All systems ready");
+  Log.infoln("[INIT] All systems ready");
   delay(1000);
+
+  // stepper_r.setSpeed(4000);
+  // stepper_l.setSpeed(4000);
+
+  // stepper_r.move(32000);
+  // stepper_l.move(32000);
 }
 
 void loop() {
-  long prevUS = micros();
-  imu.update();
-  RotationEuler rotation = imu.getRotationEuler();
-  long deltaUS = micros() - prevUS;
-
-  Serial.print("[DATA]: X: ");
-  Serial.print(rotation.x);
-  Serial.print(", Y: ");
-  Serial.print(rotation.y);
-  Serial.print(", Z: ");
-  Serial.print(rotation.z);
-  Serial.print(", US: ");
-  Serial.println(deltaUS);
-
-  delay(100);
+  Log.infoln(F(">stepper_r_steps:%l" CR), stepper_r.currentPosition());
 }
+
+// void loop() {
+//   long prevUS = micros();
+//   imu.update();
+//   RotationEuler rotation = imu.getRotationEuler();
+//   long deltaUS = micros() - prevUS;
+
+//   Serial.print("[DATA]: X: ");
+//   Serial.print(rotation.x);
+//   Serial.print(", Y: ");
+//   Serial.print(rotation.y);
+//   Serial.print(", Z: ");
+//   Serial.print(rotation.z);
+//   Serial.print(", US: ");
+//   Serial.println(deltaUS);
+
+//   delay(100);
+// }

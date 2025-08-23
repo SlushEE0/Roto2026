@@ -1,4 +1,4 @@
-#include "Stepper.h"
+#include "stepper.h"
 
 #define MAX_STEPPERS 6
 static Stepper *steppers[MAX_STEPPERS];
@@ -23,7 +23,6 @@ Stepper::Stepper(uint8_t stepPin, uint8_t dirPin, uint8_t enablePin) :
     steppers[stepperCount++] = this;
   }
 
-  // init ISR once
   static bool timerInit = false;
   if (!timerInit) {
     cli();
@@ -68,6 +67,12 @@ void Stepper::enable() {
 void Stepper::disable() {
   if (_enablePin != 255)
     digitalWrite(_enablePin, HIGH);
+}
+
+void Stepper::reverse() {
+  // Flip the direction by moving equal distance in the opposite direction
+  long distance = _targetPos - _currentPos;
+  move(-distance);
 }
 
 void Stepper::stepService() {

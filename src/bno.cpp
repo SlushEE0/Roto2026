@@ -1,7 +1,6 @@
 #include <bno.h>
 
 static constexpr uint16_t REPORT_INTERVAL_MS = 10; // 100 Hz
-static constexpr float G_TO_MS2 = 9.80665;
 
 BNO::BNO() {
   isConnected = false;
@@ -9,8 +8,7 @@ BNO::BNO() {
 
   accel = { 0.0, 0.0, 0.0 };
   gyro = { 0.0, 0.0, 0.0 };
-  rotationQuat = { 1.0, 0.0, 0.0, 0.0 };
-  rotationEuler = { 0.0, 0.0, 0.0 };
+  rotation = { 0.0, 0.0, 0.0 };
 }
 
 BNO::~BNO() {
@@ -35,6 +33,15 @@ bool BNO::connect(int csPin, int intPin, int rstPin, unsigned long spiSpeed) {
   return true;
 }
 
+void BNO::init() {
+  enableSensors(); // calibrated accel + gyro, 100 Hz
+  tare();
+}
+
+void BNO::tare() {
+  Serial.println("[BNO] Tare completed (not implemented ytet)");
+}
+
 void BNO::disconnect() {
   isConnected = false;
   sensorsEnabled = false;
@@ -42,11 +49,6 @@ void BNO::disconnect() {
 
 bool BNO::isReady() {
   return isConnected && sensorsEnabled;
-}
-
-void BNO::init() {
-  enableSensors(); // calibrated accel + gyro, 100 Hz
-  tare();
 }
 
 void BNO::enableSensors() {
@@ -93,9 +95,9 @@ void BNO::updateSensorData() {
     //   gyro.z = bno.getGyroZ();
     // }
     if (id == SENSOR_REPORTID_ROTATION_VECTOR) {
-      rotationEuler = { .x = bno.getRoll(),
-                        .y = bno.getPitch(),
-                        .z = bno.getYaw() };
+      rotation.setRollRads(bno.getRoll());
+      rotation.setPitchRads(bno.getPitch());
+      rotation.setYawRads(bno.getYaw());
     }
   }
 }
@@ -114,26 +116,14 @@ void BNO::update() {
   }
 
   updateSensorData();
-
-  filter.updateIMU(&rotationEuler);
-
-  RotationEuler filtered = filter.getRotationEuler();
-  setRotation(filtered);
 }
 
-void BNO::setRotation(RotationEuler rotation) {
-  rotationEuler = rotation;
-  rotationQuat = cnv_eulerToQuat(&rotation);
+void BNO::setRotation(Rotation *rotation) {
+  rotation = rotation;
 }
 
-void BNO::setRotation(RotationQuat rotation) { /* optional */ }
-
-RotationEuler BNO::getRotationEuler() {
-  return rotationEuler;
-}
-
-RotationQuat BNO::getRotationQuat() {
-  return rotationQuat;
+Rotation *BNO::getRotation() {
+  return &rotation;
 }
 
 AccelData BNO::getAccelData() {
@@ -142,8 +132,4 @@ AccelData BNO::getAccelData() {
 
 GyroData BNO::getGyroData() {
   return gyro;
-}
-
-void BNO::tare() {
-  Serial.println("[BNO] Tare completed");
 }

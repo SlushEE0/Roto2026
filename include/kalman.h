@@ -10,7 +10,7 @@ public:
   void updateIMU(RotationEuler *rotation);
 
   RotationEuler getRotationEuler();
-  RotationQuat getRotationQuat();
+  Quaternion getRotationQuat();
 
   // Optional external measurement (not used in current file but kept for API)
   // void setMeasurementQuat(const RotationQuat &z);
