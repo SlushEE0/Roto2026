@@ -1,31 +1,71 @@
 #pragma once
-#include <Arduino.h>
+#include <FastAccelStepper.h>
 
-class Stepper {
+#include <config.h>
+
+class StepperMotor {
 public:
-  // Pass enablePin as optional; set to 255 if unused
-  Stepper(uint8_t stepPin, uint8_t dirPin, uint8_t enablePin = 255);
+  StepperMotor(FastAccelStepperEngine &engine,
+               uint8_t stepPin,
+               uint8_t dirPin,
+               uint8_t enPin) :
+    stepPin(stepPin),
+    dirPin(dirPin),
+    engine(engine),
+    enPin(enPin),
+    stepper(nullptr),
+    currentPosition(0) {
+    init();
+  }
 
-  void setSpeed(long stepsPerSec); // constant speed
-  void moveTo(long absolute); // absolute move
-  void move(long relative); // relative move
-  long currentPosition(); // get current steps
-  bool isBusy(); // is motor still moving?
-  void enable();
-  void disable();
+  void init() {
+    stepper = engine.stepperConnectToPin(stepPin);
+    if (stepper) {
+      stepper->setDirectionPin(dirPin);
+      stepper->setEnablePin(enPin); // disable enable pin if not used
+      stepper->setAutoEnable(true);
+      setSpeedAccel(10000, 5000); // default speed/accel
+    }
+  }
 
-  void reverse(); // reverse motion direction
+  void moveTo(long targetPosition) {
+    if (!stepper)
+      return;
+    stepper->moveTo(targetPosition);
+    currentPosition = targetPosition;
+  }
 
-  // internal: called from ISR
-  void stepService();
+  void move(long relativePosition) {
+    if (!stepper)
+      return;
+    long target = currentPosition + relativePosition;
+    moveTo(target);
+  }
+
+  long distanceToGo() {
+    return abs(stepper->targetPos() - stepper->getCurrentPosition());
+  }
+
+  long getCurrentPosition() {
+    if (!stepper)
+      return 0;
+    return stepper->getCurrentPosition();
+  }
+
+  void setSpeed(uint32_t speed) { stepper->setSpeedInTicks(speed); }
+
+  void setAccel(uint32_t accel) { stepper->setAcceleration(accel); }
+
+  void setSpeedAccel(uint32_t speed, uint32_t accel) {
+    if (!stepper)
+      return;
+    setSpeed(speed);
+    setAccel(accel);
+  }
 
 private:
-  uint8_t _stepPin, _dirPin, _enablePin;
-  volatile long _targetPos = 0;
-  volatile long _currentPos = 0;
-  volatile unsigned long _stepInterval = 1000; // µs
-  volatile unsigned long _lastStepMicros = 0;
-  volatile bool _dir = true;
-
-  friend void stepperISR();
+  uint8_t stepPin, dirPin, enPin;
+  FastAccelStepperEngine &engine;
+  FastAccelStepper *stepper;
+  long currentPosition;
 };

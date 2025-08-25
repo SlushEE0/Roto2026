@@ -1,101 +1,60 @@
-#include "stepper.h"
+// #pragma once
+// #include <FastAccelStepper.h>
 
-#define MAX_STEPPERS 6
-static Stepper *steppers[MAX_STEPPERS];
-static uint8_t stepperCount = 0;
+// // Define step and direction pins for MKS Gen L v1.0
+// #define X_STEP_PIN 54   // X step
+// #define X_DIR_PIN 55    // X direction
+// #define Z_STEP_PIN 46   // Z step
+// #define Z_DIR_PIN 48    // Z direction
 
-ISR(TIMER1_COMPA_vect) {
-  for (uint8_t i = 0; i < stepperCount; i++) {
-    steppers[i]->stepService();
-  }
-}
+// class StepperMotor {
+// public:
+//     StepperMotor(FastAccelStepperEngine& engine, uint8_t stepPin, uint8_t dirPin)
+//         : stepPin(stepPin), dirPin(dirPin), engine(engine), stepper(nullptr), currentPosition(0) {}
 
-Stepper::Stepper(uint8_t stepPin, uint8_t dirPin, uint8_t enablePin) :
-  _stepPin(stepPin),
-  _dirPin(dirPin),
-  _enablePin(enablePin) {
-  pinMode(_stepPin, OUTPUT);
-  pinMode(_dirPin, OUTPUT);
-  if (_enablePin != 255)
-    pinMode(_enablePin, OUTPUT);
+//     void init() {
+//         engine.init();
+//         stepper = engine.stepperConnectToPin(stepPin);
+//         if (stepper) {
+//             stepper->setDirectionPin(dirPin);
+//             stepper->setEnablePin(0xFF); // disable enable pin if not used
+//             stepper->setAutoEnable(false);
+//             stepper->setSpeedAcceleration(10000, 10000); // default speed/accel
+//         }
+//     }
 
-  if (stepperCount < MAX_STEPPERS) {
-    steppers[stepperCount++] = this;
-  }
+//     void moveTo(long targetPosition) {
+//         if (!stepper) return;
+//         stepper->moveTo(targetPosition);
+//         currentPosition = targetPosition;
+//     }
 
-  static bool timerInit = false;
-  if (!timerInit) {
-    cli();
-    TCCR1A = 0;
-    TCCR1B = 0;
-    OCR1A = 16; // compare every 1µs @16MHz
-    TCCR1B |= (1 << WGM12); // CTC mode
-    TCCR1B |= (1 << CS10); // prescaler = 1
-    TIMSK1 |= (1 << OCIE1A); // enable compare interrupt
-    sei();
-    timerInit = true;
-  }
-}
+//     void move(long relativePosition) {
+//         if (!stepper) return;
+//         long target = currentPosition + relativePosition;
+//         moveTo(target);
+//     }
 
-void Stepper::setSpeed(long stepsPerSec) {
-  if (stepsPerSec > 0) {
-    _stepInterval = 1000000L / stepsPerSec;
-  }
-}
+//     long getSteps() {
+//         if (!stepper) return 0;
+//         return stepper->getCurrentPosition();
+//     }
 
-void Stepper::moveTo(long absolute) {
-  _targetPos = absolute;
-}
+//     void setSpeedAcceleration(uint32_t speed, uint32_t accel) {
+//         if (!stepper) return;
+//         stepper->setSpeedAcceleration(speed, accel);
+//     }
 
-void Stepper::move(long relative) {
-  _targetPos = _currentPos + relative;
-}
+// private:
+//     uint8_t stepPin, dirPin;
+//     FastAccelStepperEngine& engine;
+//     FastAccelStepper* stepper;
+//     long currentPosition;
+// };
 
-long Stepper::currentPosition() {
-  return _currentPos;
-}
+// // Global engine
+// FastAccelStepperEngine engine = FastAccelStepperEngine();
 
-bool Stepper::isBusy() {
-  return _currentPos != _targetPos;
-}
-
-void Stepper::enable() {
-  if (_enablePin != 255)
-    digitalWrite(_enablePin, LOW);
-}
-
-void Stepper::disable() {
-  if (_enablePin != 255)
-    digitalWrite(_enablePin, HIGH);
-}
-
-void Stepper::reverse() {
-  // Flip the direction by moving equal distance in the opposite direction
-  long distance = _targetPos - _currentPos;
-  move(-distance);
-}
-
-void Stepper::stepService() {
-  if (_enablePin != 255) {
-    if (_currentPos != _targetPos)
-      enable();
-    else
-      disable();
-  }
-
-  unsigned long now = micros();
-  if (_currentPos == _targetPos)
-    return;
-
-  if ((now - _lastStepMicros) >= _stepInterval) {
-    _dir = (_targetPos > _currentPos);
-    digitalWrite(_dirPin, _dir ? HIGH : LOW);
-
-    // step pulse
-    digitalWrite(_stepPin, HIGH);
-    digitalWrite(_stepPin, LOW);
-
-    _currentPos += (_dir ? 1 : -1);
-    _lastStepMicros = now;
-  }
-}
+// // Define your steppers
+// StepperMotor stepperX(engine, X_STEP_PIN, X_DIR_PIN);
+// StepperMotor stepperZ(engine, Z_STEP_PIN, Z_DIR_PIN);
