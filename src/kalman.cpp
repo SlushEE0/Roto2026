@@ -32,9 +32,9 @@ void Kalman::updateWheels(double *yaw) {
   P_k = P_k + Q;
 
   // Wrap to [0, 2π)
-  x_k = fmod(x_k, 2.0 * M_PI);
+  x_k = fmod(x_k, 2.0 * PI);
   if (x_k < 0)
-    x_k += 2.0 * M_PI;
+    x_k += 2.0 * PI;
 
   currRotation.z = x_k;
   currRotation.x = 0.0;
@@ -50,10 +50,10 @@ void Kalman::updateIMU(RotationEuler *rotation) {
   double y = z - x_k;
 
   // Normalize residual to [-π, π)
-  if (y > M_PI)
-    y -= 2.0 * M_PI;
-  if (y < -M_PI)
-    y += 2.0 * M_PI;
+  if (y > PI)
+    y -= 2.0 * PI;
+  if (y < -PI)
+    y += 2.0 * PI;
 
   // Kalman gain
   double K = P_k / (P_k + R);
@@ -65,9 +65,9 @@ void Kalman::updateIMU(RotationEuler *rotation) {
   P_k = (1 - K) * P_k;
 
   // Wrap angle again
-  x_k = fmod(x_k, 2.0 * M_PI);
+  x_k = fmod(x_k, 2.0 * PI);
   if (x_k < 0)
-    x_k += 2.0 * M_PI;
+    x_k += 2.0 * PI;
 
   currRotation.z = x_k;
   currRotation.x = 0.0;

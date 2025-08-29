@@ -31,6 +31,8 @@ typedef struct {
 
 static const double MMsPerStep = STEPS_PER_REV / (WHEEL_DIAMETER_MM * PI);
 
+#define copysign(x, y) ((x) * (y < 0 ? -1 : 1))
+
 static inline long cnv_stepsToMM(long steps) {
   return steps * MMsPerStep;
 }

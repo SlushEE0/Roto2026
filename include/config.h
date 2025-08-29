@@ -1,20 +1,36 @@
 #pragma once
 
-#define X_STEP_PIN 54
-#define X_DIR_PIN 55
-#define X_ENABLE_PIN 38
+// #define X_STEP_PIN 54
+// #define X_DIR_PIN 55
+// #define X_ENABLE_PIN 38
 
-#define Y_STEP_PIN 60
-#define Y_DIR_PIN 61
-#define Y_ENABLE_PIN 56
+// #define Y_STEP_PIN 60
+// #define Y_DIR_PIN 61
+// #define Y_ENABLE_PIN 56
 
-#define Z_STEP_PIN 46
-#define Z_DIR_PIN 48
-#define Z_ENABLE_PIN 62
+// #define Z_STEP_PIN 46
+// #define Z_DIR_PIN 48
+// #define Z_ENABLE_PIN 62
 
-#define E0_STEP_PIN 26
-#define E0_DIR_PIN 28
-#define E0_ENABLE_PIN 24
+// #define E0_STEP_PIN 26
+// #define E0_DIR_PIN 28
+// #define E0_ENABLE_PIN 24
+
+#define X_STEP_PIN PC2
+#define X_DIR_PIN PB9
+#define X_ENABLE_PIN PC3
+
+#define Y_STEP_PIN PB8
+#define Y_DIR_PIN PB7
+#define Y_ENABLE_PIN PC3
+
+#define Z_STEP_PIN PB6
+#define Z_DIR_PIN PB5
+#define Z_ENABLE_PIN PC3
+
+#define E0_STEP_PIN PB4
+#define E0_DIR_PIN PB3
+#define E0_ENABLE_PIN PC3
 
 #define MICROSTEPS 16
 #define STEPS_PER_REV (200 * MICROSTEPS)
