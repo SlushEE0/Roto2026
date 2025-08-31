@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <stm32f103xe.h>
 
+#ifndef digitalWriteFast
+#define digitalWriteFast digitalWrite
+#endif
+
 class Stepper {
     private:
   static Stepper *steppers[2];
@@ -18,7 +22,7 @@ class Stepper {
   volatile long _targetSteps = 0;
   volatile bool _isRunning   = false;
 
-  int  _direction    = 1;
+  bool _direction    = false;
   bool _isEnabled    = false;
   bool _isReversed   = false;
   int  _pulseWidthUs = 1;
@@ -39,6 +43,16 @@ class Stepper {
       _timerInst(timer),
       _isReversed(isReversed) {
     _timer = new HardwareTimer(timer);
+
+    // Configure pins for A4988: EN low = enable, STEP on rising edge, DIR sets
+    // direction
+    pinMode(_stepPin, OUTPUT);
+    pinMode(_dirPin, OUTPUT);
+    pinMode(_enablePin, OUTPUT);
+    digitalWriteFast(_stepPin, LOW);
+    digitalWriteFast(_dirPin, LOW);
+    digitalWriteFast(_enablePin, HIGH); // start disabled
+    _isEnabled = false;
 
     if (timer == TIM1) {
       _index = 0;
@@ -62,7 +76,7 @@ class Stepper {
         break;
     }
 
-    _timer->setOverflow(1000, MICROSEC_FORMAT);
+    _timer->setOverflow(100, MICROSEC_FORMAT);
     _timer->pause();
   }
 
@@ -92,6 +106,8 @@ class Stepper {
     if (isAtTargetSteps()) return;
 
     enable();
+    // Give A4988 a short time after EN goes low before first step
+    delayMicroseconds(10);
     _timer->resume();
   }
 
@@ -99,7 +115,7 @@ class Stepper {
     if (isAtTargetSteps())
       _periodUs = 0;
     else
-      _periodUs = 625;
+      _periodUs = 50;
 
     return _periodUs;
   }
@@ -107,16 +123,16 @@ class Stepper {
   void computeMovement() {
     if (isAtTargetSteps()) {
       setIsRunning(false);
-      _timer->setOverflow(1000, MICROSEC_FORMAT);
+      _timer->setOverflow(100, MICROSEC_FORMAT);
       _timer->pause();
     } else {
       setIsRunning(true);
     }
 
     if (_targetSteps > _steps) {
-      _direction = 1;
+      _direction = true;
     } else if (_targetSteps < _steps) {
-      _direction = -1;
+      _direction = false;
     }
 
     updatePeriod();
@@ -147,25 +163,26 @@ class Stepper {
   }
 
   void runMovement() {
-    int dirPinState = _isReversed ? -_direction : _direction;
+    bool dirPinState = _isReversed ? !_direction : _direction;
     digitalWriteFast(_dirPin, dirPinState);
 
-    // do one step
-    digitalWriteFast(_stepPin, 1);
-    delayMicroseconds(_pulseWidthUs);
-    digitalWriteFast(_stepPin, 0);
+    // delayMicroseconds(2);
 
-    _steps += 1 * _direction;
+    // one step
+    digitalWriteFast(_stepPin, HIGH);
+    delayMicroseconds(_pulseWidthUs);
+    digitalWriteFast(_stepPin, LOW);
+
+    _steps += _direction ? 1 : -1;
   }
 
   void callback() {
     if (isAtTargetSteps()) { return _timer->pause(); }
 
     computeMovement();
-    runMovement();
-
     _timer->setOverflow(_periodUs, MICROSEC_FORMAT);
-    _timer->resume();
+
+    runMovement();
   };
 
   static void ISR_0() { steppers[0]->callback(); }
