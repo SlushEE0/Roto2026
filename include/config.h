@@ -44,4 +44,4 @@
 #define WHEEL_DIAMETER_MM 50
 
 #define MOTOR_MAX_ACCEL 36000 // steps/sec^2
-#define MOTOR_MAX_SPEED 28000 // steps/sec
+#define MOTOR_MAX_SPEED 20000 // steps/sec

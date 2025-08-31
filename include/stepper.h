@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <stm32f103xe.h>
 
 #ifndef digitalWriteFast
 #define digitalWriteFast digitalWrite
