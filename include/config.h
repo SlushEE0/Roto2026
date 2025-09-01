@@ -38,6 +38,11 @@
 
 // =============================================================== //
 
+#define BNO_INT_PIN PB_2
+#define BNO_RST_PIN PC_6
+#define BNO_SDA_PIN PB_11
+#define BNO_SCL_PIN PB_10
+
 #define MICROSTEPS 16
 #define STEPS_PER_REV (200 * MICROSTEPS)
 

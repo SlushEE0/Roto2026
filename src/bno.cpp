@@ -1,33 +1,44 @@
+#include <SPI.h>
 #include <bno.h>
 
 static constexpr uint16_t REPORT_INTERVAL_MS = 10; // 100 Hz
 
 BNO::BNO() {
-  isConnected = false;
+  isConnected    = false;
   sensorsEnabled = false;
 
-  accel = { 0.0, 0.0, 0.0 };
-  gyro = { 0.0, 0.0, 0.0 };
-  rotation = { 0.0, 0.0, 0.0 };
+  accel    = {0.0, 0.0, 0.0};
+  gyro     = {0.0, 0.0, 0.0};
+  rotation = {0.0, 0.0, 0.0};
 }
 
-BNO::~BNO() {
-  disconnect();
-}
+BNO::~BNO() { disconnect(); }
 
-bool BNO::connect(int csPin, int intPin, int rstPin, unsigned long spiSpeed) {
-  cs_pin = csPin;
+bool BNO::connect(PinName       sda,
+                  PinName       scl,
+                  PinName       intPin,
+                  PinName       rstPin,
+                  unsigned long freq) {
   int_pin = intPin;
   rst_pin = rstPin;
 
-  Serial.println("[BNO] Connecting to IMU...");
+  Serial1.println("[BNO] Connecting to IMU...");
 
-  if (!bno.beginSPI(cs_pin, int_pin, rst_pin, spiSpeed, SPI)) {
-    Serial.println("[BNO] Failed to connect to BNO08x");
+  bno.enableDebugging(Serial1);
+
+  Wire.setSDA(sda);
+  Wire.setSCL(scl);
+  // Wire.setClock(freq); // <-- crashes for some reason
+
+  Wire.begin();
+
+  if (!bno.begin(0x4B, Wire, int_pin, rst_pin)) {
+    Serial1.println("[BNO] Failed to connect to BNO08x");
     return false;
   }
+
+  Serial1.println("[BNO] Connected successfully");
   isConnected = true;
-  Serial.println("[BNO] Connected successfully");
 
   init();
   return true;
@@ -39,38 +50,50 @@ void BNO::init() {
 }
 
 void BNO::tare() {
-  Serial.println("[BNO] Tare completed (not implemented ytet)");
+  Serial1.println("[BNO] Tare completed (not implemented ytet)");
 }
 
 void BNO::disconnect() {
-  isConnected = false;
+  isConnected    = false;
   sensorsEnabled = false;
 }
 
-bool BNO::isReady() {
-  return isConnected && sensorsEnabled;
-}
+bool BNO::isReady() { return isConnected; }
 
 void BNO::enableSensors() {
   const int MAX_RETRIES = 10;
-  bool successAccel = false, successGyro = false;
 
-  Serial.print("[BNO] Enabling calibrated Accel+Gyro @ ");
-  Serial.print(REPORT_INTERVAL_MS);
-  Serial.println(" ms...");
+  Serial1.print("[BNO] Enabling Rotation Vector @ ");
+  Serial1.print(REPORT_INTERVAL_MS);
+  Serial1.println(" ms...");
 
   for (int i = 0; i < MAX_RETRIES; i++) {
-    // Calibrated reports (NOT raw)
-    if (bno.enableRotationVector(REPORT_INTERVAL_MS))
-      successAccel = true;
+    static int successCount = 0;
+    // Enable rotation vector (includes accelerometer, gyroscope, and
+    // magnetometer fusion)
+    if (bno.enableGameRotationVector(REPORT_INTERVAL_MS)) {
+      Serial1.println("[BNO] Game Rotation Vector enabled");
+      successCount++;
+    }
+    if (bno.enableAccelerometer(REPORT_INTERVAL_MS)) {
+      Serial1.println("[BNO] Accelerometer enabled");
+      successCount++;
+    }
+    if (bno.enableGyro(REPORT_INTERVAL_MS)) {
+      Serial1.println("[BNO] Gyroscope enabled");
+      successCount++;
+    }
 
-    if (successAccel && successGyro)
+    if (successCount >= 3) {
+      sensorsEnabled = true;
       break;
+    }
+
+    Serial1.println("[BNO] Retry...");
     delay(100);
   }
 
-  sensorsEnabled = successAccel && successGyro;
-  Serial.println(sensorsEnabled ? "  SUCCESS" : "  FAILED");
+  Serial1.println(sensorsEnabled ? "[BNO] SUCCESS" : "[BNO] FAILED");
 
   delay(100); // let sensors settle
 }
@@ -80,21 +103,21 @@ void BNO::updateSensorData() {
   if (bno.getSensorEvent()) {
     uint8_t id = bno.getSensorEventID();
 
-    // // Calibrated accelerometer → m/s^2
-    // if (id == SENSOR_REPORTID_ACCELEROMETER ||
-    //     id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
-    //   accel.x = bno.getAccelX();
-    //   accel.y = bno.getAccelY();
-    //   accel.z = bno.getAccelZ();
-    // }
-    // // Calibrated gyro → radians/s
-    // else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
-    //          id == SENSOR_REPORTID_RAW_GYROSCOPE) {
-    //   gyro.x = bno.getGyroX();
-    //   gyro.y = bno.getGyroY();
-    //   gyro.z = bno.getGyroZ();
-    // }
-    if (id == SENSOR_REPORTID_ROTATION_VECTOR) {
+    // Calibrated accelerometer → m/s^2
+    if (id == SENSOR_REPORTID_ACCELEROMETER ||
+        id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
+      accel.x = bno.getAccelX();
+      accel.y = bno.getAccelY();
+      accel.z = bno.getAccelZ();
+    }
+    // Calibrated gyro → radians/s
+    else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
+             id == SENSOR_REPORTID_RAW_GYROSCOPE) {
+      gyro.x = bno.getGyroX();
+      gyro.y = bno.getGyroY();
+      gyro.z = bno.getGyroZ();
+    }
+    if (id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
       rotation.setRollRads(bno.getRoll());
       rotation.setPitchRads(bno.getPitch());
       rotation.setYawRads(bno.getYaw());
@@ -104,13 +127,12 @@ void BNO::updateSensorData() {
 
 void BNO::update() {
   if (!isReady()) {
-    Serial.println("[BNO] Not ready - isConnected: " + String(isConnected) +
-                   ", sensorsEnabled: " + String(sensorsEnabled));
+    Serial1.println("[BNO] Not ready");
     return;
   }
 
   if (bno.wasReset() && millis() > 2000) {
-    Serial.println("[BNO] Reset detected, re-enabling sensors");
+    Serial1.println("[BNO] Reset detected, re-enabling sensors");
     enableSensors();
     return;
   }
@@ -118,18 +140,8 @@ void BNO::update() {
   updateSensorData();
 }
 
-void BNO::setRotation(Rotation *rotation) {
-  rotation = rotation;
-}
+void BNO::setRotation(Rotation *rotation) { rotation = rotation; }
 
-Rotation *BNO::getRotation() {
-  return &rotation;
-}
-
-AccelData BNO::getAccelData() {
-  return accel;
-}
-
-GyroData BNO::getGyroData() {
-  return gyro;
-}
+Rotation *BNO::getRotation() { return &rotation; }
+AccelData BNO::getAccelData() { return accel; }
+GyroData  BNO::getGyroData() { return gyro; }

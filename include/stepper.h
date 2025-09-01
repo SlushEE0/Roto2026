@@ -72,6 +72,8 @@ class Stepper {
         break;
       default:
         // Unsupported timer
+        while (true) Serial1.println("[Stepper] Unsupported timer");
+
         break;
     }
 

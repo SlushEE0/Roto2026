@@ -4,12 +4,15 @@
 #include <kalman.h>
 
 class BNO {
-public:
+    public:
   BNO();
   ~BNO();
 
-  bool
-  connect(int csPin, int intPin, int rstPin, unsigned long spiSpeed = 800000);
+  bool connect(PinName       sda,
+               PinName       scl,
+               PinName       intPin,
+               PinName       rstPin,
+               unsigned long freq = 350000);
   void disconnect();
   bool isReady();
   void update();
@@ -17,9 +20,9 @@ public:
 
   Rotation *getRotation();
   AccelData getAccelData();
-  GyroData getGyroData();
+  GyroData  getGyroData();
 
-private:
+    private:
   void init();
   void enableSensors();
   void updateSensorData();
@@ -34,8 +37,8 @@ private:
   bool sensorsEnabled;
 
   AccelData accel;
-  GyroData gyro;
-  Rotation rotation;
+  GyroData  gyro;
+  Rotation  rotation;
 
   BNO08x bno;
   Kalman filter;
