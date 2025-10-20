@@ -18,6 +18,8 @@ class BNO {
   AccelData accel;
   GyroData  gyro;
   Rotation  rotation;
+  double    yawOffset;
+  bool      yawOffsetInitialized;
 
   BNO08x bno;
 
@@ -26,9 +28,11 @@ class BNO {
     isConnected    = false;
     sensorsEnabled = false;
 
-    accel    = {0.0, 0.0, 0.0};
-    gyro     = {0.0, 0.0, 0.0};
-    rotation = {0.0, 0.0, 0.0};
+    accel                = {0.0, 0.0, 0.0};
+    gyro                 = {0.0, 0.0, 0.0};
+    rotation             = {0.0, 0.0, 0.0};
+    yawOffsetInitialized = false;
+    yawOffset            = 0.0;
   }
 
   ~BNO() { disconnect(); }
@@ -94,6 +98,7 @@ class BNO {
     Serial1.println("[BNO] Taring...");
     bno.tareNow(true, SH2_TARE_BASIS_GAMING_ROTATION_VECTOR);
     bno.saveTare();
+    yawOffsetInitialized = false; // next update will re-zero yaw
     Serial1.println("[BNO] Tare completed");
   }
 
@@ -167,6 +172,7 @@ class BNO {
     Serial1.println(sensorsEnabled ? "[BNO] SUCCESS" : "[BNO] FAILED");
 
     delay(100); // let sensors settle
+    yawOffsetInitialized = false;
   }
 
   void updateSensorData() {
@@ -191,7 +197,12 @@ class BNO {
       if (id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
         rotation.setRollRads(bno.getRoll());
         rotation.setPitchRads(bno.getPitch());
-        rotation.setYawRads(bno.getYaw());
+        double rawYaw = bno.getYaw();
+        if (!yawOffsetInitialized) {
+          yawOffset            = rawYaw;
+          yawOffsetInitialized = true;
+        }
+        rotation.setYawRads(rawYaw - yawOffset);
       }
     }
   }

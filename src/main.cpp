@@ -28,7 +28,7 @@ void fastLoop() {
 }
 
 void setup() {
-  Serial1.begin(230400);
+  Serial1.begin(250000);
   while (!Serial1);
 
   Serial1.println("[INIT] Roto2026 Starting");
@@ -53,14 +53,15 @@ void setup() {
 }
 
 void loop() {
-  drivetrain.driveDistance(90, 40, 80);
-
   Pose pose = drivetrain.getPose();
-  Serial1.printf("Pose X:%0.2f Y:%0.2f Yaw:%0.2f deg | Mode:%d\n",
-                 pose.x,
-                 pose.y,
-                 pose.rot.getYawDegs(),
-                 static_cast<int>(drivetrain.mode()));
+  Serial1.print("Pose X:");
+  Serial1.print(pose.x, 2);
+  Serial1.print(" Y:");
+  Serial1.print(pose.y, 2);
+  Serial1.print(" Yaw:");
+  Serial1.print(pose.rot.getYawDegs(), 2);
+  Serial1.print(" deg | Mode:");
+  Serial1.println(static_cast<int>(drivetrain.mode()));
 
-  delay(21000);
+  delay(30);
 }
