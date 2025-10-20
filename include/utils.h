@@ -6,36 +6,56 @@
 
 #define G_MS2 9.80665
 
-typedef struct {
+struct RotationEuler {
   double x; // roll
   double y; // pitch
   double z; // yaw
-} RotationEuler;
 
-typedef struct {
+  RotationEuler() : x(0.0), y(0.0), z(0.0) {}
+  RotationEuler(double rx, double ry, double rz) : x(rx), y(ry), z(rz) {}
+};
+
+struct Quaternion {
   double w; // scalar component
   double x; // vector x component
   double y; // vector y component
   double z; // vector z component
-} Quaternion;
+
+  Quaternion() : w(1.0), x(0.0), y(0.0), z(0.0) {}
+  Quaternion(double qw, double qx, double qy, double qz)
+    : w(qw), x(qx), y(qy), z(qz) {};
+};
 
 // m/s^2
-typedef struct {
+struct AccelData {
   double x, y, z;
-} AccelData;
+
+  AccelData() : x(0.0), y(0.0), z(0.0) {}
+  AccelData(double ax, double ay, double az) : x(ax), y(ay), z(az) {}
+};
 
 // rad/s
-typedef struct {
+struct GyroData {
   double x, y, z;
-} GyroData;
 
-static const double MMsPerStep = STEPS_PER_REV / (WHEEL_DIAMETER_MM * PI);
+  GyroData() : x(0.0), y(0.0), z(0.0) {}
+  GyroData(double gx, double gy, double gz) : x(gx), y(gy), z(gz) {}
+};
 
-#define copysign(x, y) ((x) * (y < 0 ? -1 : 1))
+// Conversion helpers
+// steps per cm
+static const double StepsPerCM =
+  (double)STEPS_PER_REV / (WHEEL_DIAMETER_CM * PI);
+// cm per step
+static const double CMPerStep = 1.0 / StepsPerCM;
 
-static inline long cnv_stepsToMM(long steps) { return steps * MMsPerStep; }
+#define copysign(x, y) (y < 0.0 ? -fabs(x) : fabs(x))
 
-static inline long cnv_MMToSteps(long mm) { return mm / MMsPerStep; }
+// Conversions
+static inline double cnv_stepsToCM(long steps) {
+  return (double)steps * CMPerStep;
+}
+static inline long cnv_CMToSteps(double cm) { return lround(cm * StepsPerCM); }
 
 static inline void normalizeQuat(Quaternion &q) {
   double norm = sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
@@ -46,39 +66,43 @@ static inline void normalizeQuat(Quaternion &q) {
     q.z = q.z / norm;
   }
 }
-
-static inline bool clamp(long &value, long min, long max) {
-  if (value < min) {
-    value = min;
-  } else if (value > max) {
-    value = max;
-  } else {
-    return false;
-  }
-
-  return true;
-}
-
 class Rotation {
-    private:
-  double roll;  // rotation around x-axis
-  double pitch; // rotation around y-axis
-  double yaw;   // rotation around z-axis
+    public:
+  double roll  = 0; // rotation around x-axis
+  double pitch = 0; // rotation around y-axis
+  double yaw   = 0; // rotation around z-axis
 
   double normalizeAngleRads(double angle) {
-    while (angle > PI) angle -= 2.0 * PI;
-    while (angle < -PI) angle += 2.0 * PI;
+    while (angle > PI) angle -= TWO_PI;
+    while (angle < -PI) angle += TWO_PI;
     return angle;
   }
 
   double degToRad(double deg) { return deg * PI / 180.0; }
   double radToDeg(double rad) { return rad * 180.0 / PI; }
 
-    public:
   // Constructors
   Rotation() : roll(0), pitch(0), yaw(0) {}
+  Rotation(double r, double p, double y) { setFromRadians(r, p, y); }
 
-  Rotation(double r, double p, double y) : roll(r), pitch(p), yaw(y) {}
+  static Rotation fromDegrees(double r, double p, double y) {
+    Rotation rot;
+    rot.setFromDegrees(r, p, y);
+    return rot;
+  }
+
+  Rotation fromRadians(double r, double p, double y) {
+    Rotation rot;
+    rot.setFromRadians(r, p, y);
+    return rot;
+  }
+
+  Rotation operator+(const Rotation &r) const {
+    return Rotation(roll + r.roll, pitch + r.pitch, yaw + r.yaw);
+  }
+  Rotation operator-(const Rotation &r) const {
+    return Rotation(roll - r.roll, pitch - r.pitch, yaw - r.yaw);
+  }
 
   void setFromRadians(double r, double p, double y) {
     roll  = normalizeAngleRads(r);
@@ -135,7 +159,7 @@ class Rotation {
   }
 
   // Get rotation in radians
-  RotationEuler getRadians() {
+  RotationEuler getRadians() const {
     RotationEuler result;
     result.x = roll;
     result.y = pitch;
@@ -240,5 +264,21 @@ class Rotation {
     Serial.print(q.y);
     Serial.print(", Z: ");
     Serial.println(q.z);
+  }
+};
+
+struct Pose {
+  double   x;   // cm
+  double   y;   // cm
+  Rotation rot; // heading
+
+  Pose() : x(0.0), y(0.0), rot() {}
+  Pose(double xcm, double ycm, const Rotation &r) : x(xcm), y(ycm), rot(r) {}
+
+  Pose operator+(const Pose &p) const {
+    return Pose(x + p.x, y + p.y, rot + p.rot);
+  }
+  Pose operator-(const Pose &p) const {
+    return Pose(x - p.x, y - p.y, rot - p.rot);
   }
 };

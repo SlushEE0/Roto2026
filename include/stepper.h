@@ -1,194 +1,66 @@
+#pragma once
 #include <Arduino.h>
-
-#ifndef digitalWriteFast
-#define digitalWriteFast digitalWrite
-#endif
+#include <HardwareTimer.h>
 
 class Stepper {
-    private:
-  static Stepper *steppers[2];
-  int             _index;
-
-  PinName _stepPin;
-  PinName _dirPin;
-  PinName _enablePin;
-
-  int _speed = 3000; // steps/s
-  int _accel = 1000; // steps/s^2
-  int _jerk  = 9;    // steps/s^3
-
-  volatile long _steps       = 0;
-  volatile long _targetSteps = 0;
-  volatile bool _isRunning   = false;
-
-  bool _direction    = false;
-  bool _isEnabled    = false;
-  bool _isReversed   = false;
-  int  _pulseWidthUs = 1;
-  long _periodUs     = 0;
-
-  TIM_TypeDef   *_timerInst;
-  HardwareTimer *_timer;
-
     public:
-  Stepper(PinName      step,
-          PinName      dir,
-          PinName      en,
-          TIM_TypeDef *timer,
-          bool         isReversed = false)
-    : _stepPin(step),
-      _dirPin(dir),
-      _enablePin(en),
-      _timerInst(timer),
-      _isReversed(isReversed) {
-    _timer = new HardwareTimer(timer);
+  Stepper(HardwareTimer *timer,
+          uint8_t        stepPin,
+          uint8_t        dirPin,
+          uint8_t        enablePin,
+          bool           invertDir = false);
 
-    // Configure pins for A4988: EN low = enable, STEP on rising edge, DIR sets
-    // direction
-    pinMode(_stepPin, OUTPUT);
-    pinMode(_dirPin, OUTPUT);
-    pinMode(_enablePin, OUTPUT);
-    digitalWriteFast(_stepPin, LOW);
-    digitalWriteFast(_dirPin, LOW);
-    digitalWriteFast(_enablePin, HIGH); // start disabled
-    _isEnabled = false;
+  void begin(uint32_t timerFreqHz = 2000000UL);
+  void enable();
+  void disable();
 
-    if (timer == TIM1) {
-      _index = 0;
-    } else if (timer == TIM2) {
-      _index = 1;
-    } else {
-      _index = -1; // Unsupported timer
-    }
-
-    switch (_index) {
-      case 0:
-        steppers[0] = this;
-        _timer->attachInterrupt(ISR_0);
-        break;
-      case 1:
-        steppers[1] = this;
-        _timer->attachInterrupt(ISR_1);
-        break;
-      default:
-        // Unsupported timer
-        while (true) Serial1.println("[Stepper] Unsupported timer");
-
-        break;
-    }
-
-    _timer->setOverflow(100, MICROSEC_FORMAT);
-    _timer->pause();
-  }
-
-  int setAccel(int newAccel) { return _accel = newAccel; }
-  int setSpeed(int newSpeed) { return _speed = newSpeed; }
-  int setJerk(int newJerk) { return _jerk = newJerk; }
-
-  bool setIsReversed(bool is) { return _isReversed = is; }
-  void setIsRunning(bool is) {
-    if (_isRunning == is) return;
-
-    _isRunning = is;
-
-    if (is)
-      enable();
-    else
-      disable();
-  }
-
-  long getSteps() { return _steps; }
-  long getTargetSteps() { return _targetSteps; }
-  bool getIsEnabled() { return _isEnabled; }
-
-  bool isAtTargetSteps() { return _targetSteps == _steps; }
-
-  void beginMovement() {
-    if (isAtTargetSteps()) return;
-
-    enable();
-    // Give A4988 a short time after EN goes low before first step
-    delayMicroseconds(10);
-    _timer->resume();
-  }
-
-  long updatePeriod() {
-    if (isAtTargetSteps())
-      _periodUs = 0;
-    else
-      _periodUs = 50;
-
-    return _periodUs;
-  }
-
-  void computeMovement() {
-    if (isAtTargetSteps()) {
-      setIsRunning(false);
-      _timer->setOverflow(100, MICROSEC_FORMAT);
-      _timer->pause();
-    } else {
-      setIsRunning(true);
-    }
-
-    if (_targetSteps > _steps) {
-      _direction = true;
-    } else if (_targetSteps < _steps) {
-      _direction = false;
-    }
-
-    updatePeriod();
-  }
-
-  long moveTo(long steps) {
-    _targetSteps = steps;
-    beginMovement();
-
-    return _targetSteps;
-  }
-  long move(long steps) {
-    _targetSteps += steps;
-    beginMovement();
-
-    return _targetSteps;
-  }
-
-  void enable() {
-    if (_isEnabled == true) return;
-    digitalWriteFast(_enablePin, LOW);
-    _isEnabled = true;
-  }
-  void disable() {
-    if (_isEnabled == false) return;
-    digitalWriteFast(_enablePin, HIGH);
-    _isEnabled = false;
-  }
-
-  void runMovement() {
-    bool dirPinState = _isReversed ? !_direction : _direction;
-    digitalWriteFast(_dirPin, dirPinState);
-
-    // delayMicroseconds(2);
-
-    // one step
-    digitalWriteFast(_stepPin, HIGH);
-    delayMicroseconds(_pulseWidthUs);
-    digitalWriteFast(_stepPin, LOW);
-
-    _steps += _direction ? 1 : -1;
-  }
-
-  void callback() {
-    if (isAtTargetSteps()) { return _timer->pause(); }
-
-    computeMovement();
-    _timer->setOverflow(_periodUs, MICROSEC_FORMAT);
-
-    runMovement();
+  void moveTo(int32_t targetPosition) {
+    moveTo(targetPosition, _maxSpeed, _acceleration);
   };
+  void moveTo(int32_t targetPosition,
+              int32_t maxSpeedStepsPerSec,
+              int32_t accelStepsPerSec2);
+  void moveBy(int32_t stepDelta) {
+    moveBy(stepDelta, _maxSpeed, _acceleration);
+  };
+  void moveBy(int32_t stepDelta,
+              int32_t maxSpeedStepsPerSec,
+              int32_t accelStepsPerSec2) {
+    moveTo(
+      _currentPosition + stepDelta, maxSpeedStepsPerSec, accelStepsPerSec2);
+  };
+  void setTarget(int32_t targetPosition);
+  void setMaxSpeed(float stepsPerSecond);
+  void setAcceleration(float stepsPerSecondSquared);
 
-  static void ISR_0() { steppers[0]->callback(); }
-  static void ISR_1() { steppers[1]->callback(); }
+  bool isBusy() const { return _running; }
+  bool isAtTarget() const { return _currentPosition == _targetPosition; }
+
+  int32_t currentPosition() const { return _currentPosition; }
+  int32_t targetPosition() const { return _targetPosition; }
+  float   currentSpeed() const { return _currentSpeed; }
+
+    private:
+  void handleTimerInterrupt();
+  bool planNextStep();
+  void applyDirection(int8_t dir);
+  void primeTimer(uint32_t periodUs);
+
+  HardwareTimer *_timer;
+  uint8_t        _stepPin;
+  uint8_t        _dirPin;
+  uint8_t        _enablePin;
+  bool           _invertDir;
+
+  volatile int32_t _currentPosition;
+  volatile int32_t _targetPosition;
+
+  volatile float _currentSpeed; // signed steps/s
+  volatile float _maxSpeed;
+  volatile float _acceleration;
+
+  volatile uint32_t _stepIntervalUs;
+  volatile bool     _running;
+  volatile bool     _stepPinIsHigh;
+  volatile int8_t   _directionSign;
 };
-
-// Define the static member variable
-Stepper *Stepper::steppers[2] = {nullptr, nullptr};

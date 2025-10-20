@@ -43,10 +43,13 @@
 #define BNO_SDA_PIN PB_11
 #define BNO_SCL_PIN PB_10
 
+#define BNO_REPORT_INTERVAL_MS 10 // 100 Hz
+
 #define MICROSTEPS 16
 #define STEPS_PER_REV (200 * MICROSTEPS)
 
-#define WHEEL_DIAMETER_MM 50
+#define DT_TRACK_WIDTH_CM 173.0
+#define WHEEL_DIAMETER_CM 5.0
 
 #define MOTOR_MAX_ACCEL 36000 // steps/sec^2
 #define MOTOR_MAX_SPEED 20000 // steps/sec
