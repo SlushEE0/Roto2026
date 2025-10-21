@@ -49,7 +49,12 @@ void setup() {
   fastLoopTimer.resume();
 
   Serial1.println("[INIT] All systems ready");
-  delay(1000);
+  delay(500);
+
+  drivetrain.resetPose();
+  drivetrain.queueDriveStraight(100.0, 20.0, 50.0);
+  drivetrain.queueTurn(90.0, 45.0, 90.0);
+  drivetrain.queueDriveStraight(50.0, 20.0, 50.0);
 }
 
 void loop() {
