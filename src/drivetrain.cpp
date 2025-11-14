@@ -56,7 +56,7 @@ void DifferentialDrive::setFilter(Kalman *filter) {
 
 void DifferentialDrive::setIMU(BNO *imu) { _imu = imu; }
 
-void DifferentialDrive::resetPose(Pose &pose) {
+void DifferentialDrive::resetPose(const Pose &pose) {
   if (_filter) { _filter->reset(pose); }
 
   _pose        = pose;
@@ -200,7 +200,7 @@ void DifferentialDrive::startNextCommand() {
 bool DifferentialDrive::startDrive(double distanceCm,
                                    double maxSpeedCmPerSec,
                                    double accelCmPerSec2) {
-  long stepDelta = cmToSteps(distanceCm);
+  long stepDelta = cnv_CMToSteps(distanceCm);
   if (stepDelta == 0) { return false; }
 
   double requestedSpeedSteps =
@@ -368,7 +368,7 @@ void DifferentialDrive::updatePoseSequence(bool leftBusy, bool rightBusy) {
         return;
       }
 
-      long stepDelta = cmToSteps(distance);
+      long stepDelta = cnv_CMToSteps(distance);
       if (stepDelta == 0) {
         _posePhase = PosePhase::FinalTurn;
         return;
@@ -495,6 +495,9 @@ void DifferentialDrive::issueDriveCommand(long    stepDelta,
   _baseLeftTarget  = _left.currentPosition() + stepDelta;
   _baseRightTarget = _right.currentPosition() + stepDelta;
 
+  Serial1.println("Issuing drive command: steps=");
+  Serial1.println(stepDelta);
+
   _left.moveBy(stepDelta, maxSpeedSteps, accelSteps);
   _right.moveBy(stepDelta, maxSpeedSteps, accelSteps);
 }
@@ -546,6 +549,7 @@ double DifferentialDrive::currentYaw() const { return _pose.rot.yaw; }
 double DifferentialDrive::normalizeAngle(double angle) {
   while (angle > PI) { angle -= TWO_PI; }
   while (angle < -PI) { angle += TWO_PI; }
+
   return angle;
 }
 

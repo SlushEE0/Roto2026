@@ -20,6 +20,7 @@ class Stepper {
   void moveTo(int32_t targetPosition,
               int32_t maxSpeedStepsPerSec,
               int32_t accelStepsPerSec2);
+
   void moveBy(int32_t stepDelta) {
     moveBy(stepDelta, _maxSpeed, _acceleration);
   };
@@ -29,6 +30,7 @@ class Stepper {
     moveTo(
       _currentPosition + stepDelta, maxSpeedStepsPerSec, accelStepsPerSec2);
   };
+  
   void setTarget(int32_t targetPosition);
   void setMaxSpeed(float stepsPerSecond);
   void setAcceleration(float stepsPerSecondSquared);

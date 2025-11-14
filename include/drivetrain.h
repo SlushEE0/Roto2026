@@ -117,7 +117,6 @@ class DifferentialDrive {
   void          finishActiveCommand();
   double        currentYaw() const;
   static double normalizeAngle(double angle);
-  static long   cmToSteps(double cm);
   static int32_t
   clampSpeedSteps(double requested, double defaultValue, int32_t minValue = 1);
 };
