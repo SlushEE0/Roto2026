@@ -1,15 +1,15 @@
-#include "drivetrain.h"
-
 #include <Arduino.h>
-
-#include <algorithm>
 #include <cmath>
+
+#include "drivetrain.h"
 
 namespace {
 constexpr double kDegToRad          = PI / 180.0;
-constexpr double kHeadingTolRad     = 1.0 * kDegToRad;
-constexpr double kDistanceTolCm     = 0.5;
-constexpr double kHeadingGainFactor = 0.5;
+constexpr double kRadToDeg          = 180.0 / PI;
+constexpr double kVelocityEpsilon   = 1e-3;
+constexpr double kPoseDistanceTolCm = 0.5;
+constexpr double kPoseHeadingTolRad = 1.0 * kDegToRad;
+constexpr double kHeadingHoldGain   = 0.4;
 } // namespace
 
 DifferentialDrive::DifferentialDrive(Stepper &left,
@@ -21,546 +21,367 @@ DifferentialDrive::DifferentialDrive(Stepper &left,
     _filter(filter),
     _imu(imu),
     _mode(Mode::Idle),
-    _subAction(SubAction::None),
-    _posePhase(PosePhase::None),
-    _poseSequenceActive(false),
-    _hasActiveCommand(false),
+    _poseStage(PoseStage::Idle),
+    _poseModeActive(false),
     _pose(),
-    _activeCommand(),
-    _queue(),
     _poseTarget(),
-    _poseTargetHeading(0.0),
-    _poseFinalYaw(0.0),
+    _linearCmd(0.0),
+    _angularCmd(0.0),
+    _headingHold(0.0),
+    _headingGain(kHeadingHoldGain),
+    _poseLinearSpeed(0.0),
+    _poseTurnSpeed(0.0),
+    _poseToleranceCm(kPoseDistanceTolCm),
+    _poseToleranceRad(kPoseHeadingTolRad),
+    _leftTarget(left.currentPosition()),
+    _rightTarget(right.currentPosition()),
     _prevLeftSteps(left.currentPosition()),
     _prevRightSteps(right.currentPosition()),
-    _baseLeftTarget(left.currentPosition()),
-    _baseRightTarget(right.currentPosition()),
-    _lastUpdateMicros(micros()),
-    _turnMaxSpeedDegPerSec(0.0),
-    _turnAccelDegPerSec2(0.0),
-    _linearMaxSpeedCmPerSec(0.0),
-    _linearAccelCmPerSec2(0.0),
-    _headingHold(0.0) {
-  if (_filter) { _pose = _filter->getPoseEstimate(); }
-  _headingHold = currentYaw();
+    _positionSpeedSteps(0.0f),
+    _lastUpdateMicros(micros()) {
+  if (_filter) { _filter->reset(_pose); }
+  refreshHeadingHold();
 }
 
 void DifferentialDrive::setFilter(Kalman *filter) {
   _filter = filter;
-  if (_filter) {
-    _pose         = _filter->getPoseEstimate();
-    _headingHold  = currentYaw();
-    _poseFinalYaw = _headingHold;
-  }
+  if (_filter) { _filter->reset(_pose); }
 }
 
 void DifferentialDrive::setIMU(BNO *imu) { _imu = imu; }
 
 void DifferentialDrive::resetPose(const Pose &pose) {
+  _pose = pose;
   if (_filter) { _filter->reset(pose); }
-
-  _pose        = pose;
-  _headingHold = currentYaw();
-
   _prevLeftSteps    = _left.currentPosition();
   _prevRightSteps   = _right.currentPosition();
-  _baseLeftTarget   = _prevLeftSteps;
-  _baseRightTarget  = _prevRightSteps;
   _lastUpdateMicros = micros();
-
-  _mode               = Mode::Idle;
-  _posePhase          = PosePhase::None;
-  _poseSequenceActive = false;
-  _hasActiveCommand   = false;
-  _subAction          = SubAction::None;
-  _queue.clear();
+  refreshHeadingHold();
 }
 
-void DifferentialDrive::queueDriveStraight(double distanceCm,
-                                           double maxSpeedCmPerSec,
-                                           double accelCmPerSec2) {
-  MoveCommand cmd;
-  cmd.type      = MoveType::DriveStraight;
-  cmd.distance  = distanceCm;
-  cmd.linearMax = maxSpeedCmPerSec;
-  cmd.linearAcc = accelCmPerSec2;
-  _queue.push_back(cmd);
+void DifferentialDrive::commandVelocity(double linearCmPerSec,
+                                        double angularDegPerSec) {
+  _poseModeActive = false;
+  _poseStage      = PoseStage::Idle;
+
+  if (std::fabs(linearCmPerSec) < kVelocityEpsilon &&
+      std::fabs(angularDegPerSec) < kVelocityEpsilon) {
+    stop(false);
+    return;
+  }
+
+  _linearCmd  = linearCmPerSec;
+  _angularCmd = angularDegPerSec;
+  _mode       = Mode::Velocity;
+
+  double halfTrack     = DT_TRACK_WIDTH_CM * 0.5;
+  double angularRad    = degToRad(angularDegPerSec);
+  double leftCmPerSec  = linearCmPerSec - angularRad * halfTrack;
+  double rightCmPerSec = linearCmPerSec + angularRad * halfTrack;
+
+  if (std::fabs(angularDegPerSec) < kVelocityEpsilon) {
+    refreshHeadingHold();
+    double yawError   = normalizeAngle(_headingHold - currentYaw());
+    double correction = yawError * _headingGain;
+    leftCmPerSec -= correction * halfTrack;
+    rightCmPerSec += correction * halfTrack;
+  } else {
+    _headingHold = currentYaw();
+  }
+
+  applyVelocityCommand(leftCmPerSec, rightCmPerSec);
 }
 
-void DifferentialDrive::queueTurn(double degrees,
-                                  double maxSpeedDegPerSec,
-                                  double accelDegPerSec2) {
-  MoveCommand cmd;
-  cmd.type    = MoveType::Turn;
-  cmd.degrees = degrees;
-  cmd.turnMax = maxSpeedDegPerSec;
-  cmd.turnAcc = accelDegPerSec2;
-  _queue.push_back(cmd);
+void DifferentialDrive::commandWheelVelocities(double leftCmPerSec,
+                                               double rightCmPerSec) {
+  _poseModeActive = false;
+  _poseStage      = PoseStage::Idle;
+
+  if (std::fabs(leftCmPerSec) < kVelocityEpsilon &&
+      std::fabs(rightCmPerSec) < kVelocityEpsilon) {
+    stop(false);
+    return;
+  }
+
+  double linear     = 0.5 * (leftCmPerSec + rightCmPerSec);
+  double angularRad = (rightCmPerSec - leftCmPerSec) / DT_TRACK_WIDTH_CM;
+
+  _linearCmd   = linear;
+  _angularCmd  = angularRad * kRadToDeg;
+  _mode        = Mode::Velocity;
+  _headingHold = currentYaw();
+
+  applyVelocityCommand(leftCmPerSec, rightCmPerSec);
 }
 
-void DifferentialDrive::queueMoveToPose(const Pose &target,
-                                        double      linearSpeedCmPerSec,
-                                        double      accelCmPerSec2,
-                                        double      turnSpeedDegPerSec,
-                                        double      turnAccelDegPerSec2) {
-  MoveCommand cmd;
-  cmd.type       = MoveType::ToPose;
-  cmd.targetPose = target;
-  cmd.linearMax  = linearSpeedCmPerSec;
-  cmd.linearAcc  = accelCmPerSec2;
-  cmd.turnMax    = turnSpeedDegPerSec;
-  cmd.turnAcc    = turnAccelDegPerSec2;
-  _queue.push_back(cmd);
+void DifferentialDrive::driveStraight(double distanceCm, double speedCmPerSec) {
+  _poseModeActive = false;
+  _poseStage      = PoseStage::Idle;
+  _mode           = Mode::Position;
+  _linearCmd      = 0.0;
+  _angularCmd     = 0.0;
+
+  if (speedCmPerSec <= 0.0) {
+    speedCmPerSec = (_poseLinearSpeed > 0.0) ? _poseLinearSpeed : 20.0;
+  }
+
+  float speedSteps = static_cast<float>(std::fabs(speedCmPerSec) * StepsPerCM);
+  if (speedSteps <= 0.0f) { speedSteps = static_cast<float>(MOTOR_MAX_SPEED); }
+
+  long stepDelta      = cnv_CMToSteps(distanceCm);
+  _leftTarget         = _left.currentPosition() + stepDelta;
+  _rightTarget        = _right.currentPosition() + stepDelta;
+  _positionSpeedSteps = speedSteps;
+
+  _left.commandPosition(_leftTarget, speedSteps);
+  _right.commandPosition(_rightTarget, speedSteps);
 }
 
-void DifferentialDrive::clearQueue() { _queue.clear(); }
+void DifferentialDrive::turnDegrees(double degrees, double speedDegPerSec) {
+  _poseModeActive = false;
+  _poseStage      = PoseStage::Idle;
+  _mode           = Mode::Position;
+  _linearCmd      = 0.0;
+  _angularCmd     = 0.0;
 
-void DifferentialDrive::stop() {
-  _left.setTarget(_left.currentPosition());
-  _right.setTarget(_right.currentPosition());
+  double radians     = degToRad(degrees);
+  double halfTrack   = DT_TRACK_WIDTH_CM * 0.5;
+  double wheelTravel = radians * halfTrack;
+  long   stepDelta   = cnv_CMToSteps(wheelTravel);
 
-  _queue.clear();
-  _mode               = Mode::Idle;
-  _subAction          = SubAction::None;
-  _posePhase          = PosePhase::None;
-  _poseSequenceActive = false;
-  _hasActiveCommand   = false;
-  _headingHold        = currentYaw();
+  double angularSpeedRad = degToRad(std::fabs(speedDegPerSec));
+  double wheelSpeedCm    = angularSpeedRad * halfTrack;
+  float  speedSteps      = static_cast<float>(wheelSpeedCm * StepsPerCM);
+  if (speedSteps <= 0.0f) { speedSteps = static_cast<float>(MOTOR_MAX_SPEED); }
+
+  _leftTarget         = _left.currentPosition() - stepDelta;
+  _rightTarget        = _right.currentPosition() + stepDelta;
+  _positionSpeedSteps = speedSteps;
+
+  _left.commandPosition(_leftTarget, speedSteps);
+  _right.commandPosition(_rightTarget, speedSteps);
+}
+
+void DifferentialDrive::moveToPose(const Pose &target,
+                                   double      linearSpeedCmPerSec,
+                                   double      turnSpeedDegPerSec) {
+  _poseTarget      = target;
+  _poseLinearSpeed = std::fabs(linearSpeedCmPerSec);
+  if (_poseLinearSpeed <= 0.0) { _poseLinearSpeed = 20.0; }
+  _poseTurnSpeed = std::fabs(turnSpeedDegPerSec);
+  if (_poseTurnSpeed <= 0.0) { _poseTurnSpeed = 45.0; }
+
+  _poseModeActive = true;
+  _poseStage      = PoseStage::RotateToHeading;
+  _mode           = Mode::Idle;
+  _linearCmd      = 0.0;
+  _angularCmd     = 0.0;
+}
+
+void DifferentialDrive::stop(bool disableDrivers) {
+  _linearCmd      = 0.0;
+  _angularCmd     = 0.0;
+  _mode           = Mode::Idle;
+  _poseModeActive = false;
+  _poseStage      = PoseStage::Idle;
+
+  _left.stop(disableDrivers);
+  _right.stop(disableDrivers);
+  if (!disableDrivers) {
+    _left.enable();
+    _right.enable();
+  }
+  refreshHeadingHold();
 }
 
 void DifferentialDrive::update() {
-  unsigned long now = micros();
-  double        dt  = (_lastUpdateMicros > 0)
-                        ? static_cast<double>(now - _lastUpdateMicros) / 1e6
-                        : 0.0;
+  unsigned long now       = micros();
+  double        dtSeconds = 0.0;
+  if (now >= _lastUpdateMicros) {
+    dtSeconds = static_cast<double>(now - _lastUpdateMicros) * 1e-6;
+  }
   _lastUpdateMicros = now;
 
   long leftSteps  = _left.currentPosition();
   long rightSteps = _right.currentPosition();
-
   long deltaLeft  = leftSteps - _prevLeftSteps;
   long deltaRight = rightSteps - _prevRightSteps;
 
-  updateFilter(deltaLeft, deltaRight, dt);
+  if (deltaLeft != 0 || deltaRight != 0) {
+    updatePose(deltaLeft, deltaRight, dtSeconds);
+  } else if (_filter) {
+    _pose = _filter->getPoseEstimate();
+  }
 
   _prevLeftSteps  = leftSteps;
   _prevRightSteps = rightSteps;
 
-  bool leftBusy  = _left.isBusy();
-  bool rightBusy = _right.isBusy();
+  if (_mode == Mode::Position) {
+    if (!_left.isBusy() && !_right.isBusy()) { _mode = Mode::Idle; }
+  } else if (_mode == Mode::Velocity) {
+    double halfTrack     = DT_TRACK_WIDTH_CM * 0.5;
+    double angularRad    = degToRad(_angularCmd);
+    double leftCmPerSec  = _linearCmd - angularRad * halfTrack;
+    double rightCmPerSec = _linearCmd + angularRad * halfTrack;
 
-  if (_subAction == SubAction::Driving) { applyHeadingCorrection(); }
+    if (std::fabs(_angularCmd) < kVelocityEpsilon && _headingGain > 0.0) {
+      double yawError   = normalizeAngle(_headingHold - currentYaw());
+      double correction = yawError * _headingGain;
+      leftCmPerSec -= correction * halfTrack;
+      rightCmPerSec += correction * halfTrack;
+    }
 
-  if (_mode == Mode::MoveToPose && _poseSequenceActive) {
-    updatePoseSequence(leftBusy, rightBusy);
-  } else if (_hasActiveCommand && !leftBusy && !rightBusy) {
-    finishActiveCommand();
+    if (std::fabs(leftCmPerSec) < kVelocityEpsilon &&
+        std::fabs(rightCmPerSec) < kVelocityEpsilon) {
+      stop(false);
+    } else {
+      applyVelocityCommand(leftCmPerSec, rightCmPerSec);
+    }
   }
 
-  if (!_hasActiveCommand && !_queue.empty() && !_left.isBusy() &&
-      !_right.isBusy()) {
-    startNextCommand();
-  }
+  if (_poseModeActive) { updatePoseSequence(); }
 }
 
 bool DifferentialDrive::isBusy() const {
-  return _left.isBusy() || _right.isBusy() || _hasActiveCommand ||
-         !_queue.empty();
-}
-
-size_t DifferentialDrive::queuedMoves() const {
-  return _queue.size() +
-         (_hasActiveCommand ? static_cast<size_t>(1) : static_cast<size_t>(0));
-}
-
-void DifferentialDrive::startNextCommand() {
-  while (!_queue.empty()) {
-    MoveCommand cmd = _queue.front();
-    _queue.pop_front();
-
-    bool started = false;
-    switch (cmd.type) {
-      case MoveType::DriveStraight:
-        started = startDrive(cmd.distance, cmd.linearMax, cmd.linearAcc);
-        break;
-      case MoveType::Turn:
-        started = startTurn(cmd.degrees, cmd.turnMax, cmd.turnAcc);
-        break;
-      case MoveType::ToPose: started = startPoseCommand(cmd); break;
-    }
-
-    if (started) {
-      _activeCommand    = cmd;
-      _hasActiveCommand = true;
-      return;
-    }
+  if (_poseModeActive) { return true; }
+  if (_mode == Mode::Position) { return _left.isBusy() || _right.isBusy(); }
+  if (_mode == Mode::Velocity) {
+    return (std::fabs(_linearCmd) >= kVelocityEpsilon) ||
+           (std::fabs(_angularCmd) >= kVelocityEpsilon);
   }
+  return false;
 }
 
-bool DifferentialDrive::startDrive(double distanceCm,
-                                   double maxSpeedCmPerSec,
-                                   double accelCmPerSec2) {
-  long stepDelta = cnv_CMToSteps(distanceCm);
-  if (stepDelta == 0) { return false; }
+void DifferentialDrive::applyVelocityCommand(double leftCmPerSec,
+                                             double rightCmPerSec) {
+  float leftStepsPerSec  = static_cast<float>(leftCmPerSec * StepsPerCM);
+  float rightStepsPerSec = static_cast<float>(rightCmPerSec * StepsPerCM);
 
-  double requestedSpeedSteps =
-    (maxSpeedCmPerSec > 0.0) ? maxSpeedCmPerSec * StepsPerCM : 0.0;
-  double requestedAccelSteps =
-    (accelCmPerSec2 > 0.0) ? accelCmPerSec2 * StepsPerCM : 0.0;
-
-  int32_t maxSpeedSteps =
-    clampSpeedSteps(requestedSpeedSteps, static_cast<double>(MOTOR_MAX_SPEED));
-  int32_t accelSteps =
-    clampSpeedSteps(requestedAccelSteps, static_cast<double>(MOTOR_MAX_ACCEL));
-
-  _linearMaxSpeedCmPerSec = maxSpeedCmPerSec;
-  _linearAccelCmPerSec2   = accelCmPerSec2;
-
-  issueDriveCommand(
-    stepDelta, maxSpeedSteps, accelSteps, Mode::DrivingStraight);
-  return true;
-}
-
-bool DifferentialDrive::startTurn(double degrees,
-                                  double maxSpeedDegPerSec,
-                                  double accelDegPerSec2) {
-  double radians = degrees * kDegToRad;
-  if (std::fabs(radians) < 1e-6) { return false; }
-
-  double arcCm     = radians * (DT_TRACK_WIDTH_CM * 0.5);
-  long   stepDelta = cnv_CMToSteps(arcCm);
-  if (stepDelta == 0) { return false; }
-
-  double requestedSpeedSteps = (maxSpeedDegPerSec > 0.0)
-                                 ? std::fabs(maxSpeedDegPerSec) * kDegToRad *
-                                     (DT_TRACK_WIDTH_CM * 0.5) * StepsPerCM
-                                 : 0.0;
-  double requestedAccelSteps = (accelDegPerSec2 > 0.0)
-                                 ? std::fabs(accelDegPerSec2) * kDegToRad *
-                                     (DT_TRACK_WIDTH_CM * 0.5) * StepsPerCM
-                                 : 0.0;
-
-  int32_t maxSpeedSteps =
-    clampSpeedSteps(requestedSpeedSteps, static_cast<double>(MOTOR_MAX_SPEED));
-  int32_t accelSteps =
-    clampSpeedSteps(requestedAccelSteps, static_cast<double>(MOTOR_MAX_ACCEL));
-
-  _turnMaxSpeedDegPerSec = maxSpeedDegPerSec;
-  _turnAccelDegPerSec2   = accelDegPerSec2;
-
-  issueTurnCommand(stepDelta, maxSpeedSteps, accelSteps, Mode::Turning);
-  return true;
-}
-
-bool DifferentialDrive::startPoseCommand(const MoveCommand &command) {
-  _poseTarget   = command.targetPose;
-  _poseFinalYaw = _poseTarget.rot.getYawRads();
-
-  double dx          = _poseTarget.x - _pose.x;
-  double dy          = _poseTarget.y - _pose.y;
-  double distance    = std::sqrt(dx * dx + dy * dy);
-  _poseTargetHeading = (distance > 1e-6) ? std::atan2(dy, dx) : currentYaw();
-
-  double finalError = normalizeAngle(_poseFinalYaw - currentYaw());
-  if (distance <= kDistanceTolCm && std::fabs(finalError) <= kHeadingTolRad) {
-    return false;
+  if (MOTOR_MAX_SPEED > 0) {
+    float maxSpeed = static_cast<float>(MOTOR_MAX_SPEED);
+    if (leftStepsPerSec > maxSpeed) leftStepsPerSec = maxSpeed;
+    if (leftStepsPerSec < -maxSpeed) leftStepsPerSec = -maxSpeed;
+    if (rightStepsPerSec > maxSpeed) rightStepsPerSec = maxSpeed;
+    if (rightStepsPerSec < -maxSpeed) rightStepsPerSec = -maxSpeed;
   }
 
-  _linearMaxSpeedCmPerSec = command.linearMax;
-  _linearAccelCmPerSec2   = command.linearAcc;
-  _turnMaxSpeedDegPerSec  = command.turnMax;
-  _turnAccelDegPerSec2    = command.turnAcc;
-
-  _mode               = Mode::MoveToPose;
-  _subAction          = SubAction::None;
-  _posePhase          = PosePhase::RotateToHeading;
-  _poseSequenceActive = true;
-
-  updatePoseSequence(false, false);
-  return true;
+  _left.commandVelocity(leftStepsPerSec);
+  _right.commandVelocity(rightStepsPerSec);
 }
 
-void DifferentialDrive::finishActiveCommand() {
-  _hasActiveCommand   = false;
-  _mode               = Mode::Idle;
-  _subAction          = SubAction::None;
-  _posePhase          = PosePhase::None;
-  _poseSequenceActive = false;
-  _headingHold        = currentYaw();
-  _activeCommand      = MoveCommand();
-}
-
-void DifferentialDrive::applyHeadingCorrection() {
-  if (!_filter) { return; }
-
-  double yawError     = normalizeAngle(_headingHold - currentYaw());
-  double correctionCm = std::clamp(
-    yawError * (DT_TRACK_WIDTH_CM * 0.5) * kHeadingGainFactor, -5.0, 5.0);
-
-  long correctionSteps = cnv_CMToSteps(correctionCm);
-
-  long desiredLeft  = _baseLeftTarget - correctionSteps;
-  long desiredRight = _baseRightTarget + correctionSteps;
-
-  if (desiredLeft != _left.targetPosition()) { _left.setTarget(desiredLeft); }
-  if (desiredRight != _right.targetPosition()) {
-    _right.setTarget(desiredRight);
-  }
-}
-
-void DifferentialDrive::updatePoseSequence(bool leftBusy, bool rightBusy) {
-  if (!_poseSequenceActive) { return; }
-
-  auto finishSequence = [this]() { finishActiveCommand(); };
-
-  switch (_posePhase) {
-    case PosePhase::None: finishSequence(); return;
-
-    case PosePhase::RotateToHeading: {
-      if (_subAction == SubAction::Turning) {
-        if (!leftBusy && !rightBusy) {
-          _subAction = SubAction::None;
-        } else {
-          return;
-        }
-      }
-
-      if (_subAction != SubAction::None) { return; }
-
-      double dx       = _poseTarget.x - _pose.x;
-      double dy       = _poseTarget.y - _pose.y;
-      double distance = std::sqrt(dx * dx + dy * dy);
-      if (distance <= kDistanceTolCm) {
-        _posePhase = PosePhase::FinalTurn;
-        return;
-      }
-
-      _poseTargetHeading = std::atan2(dy, dx);
-      double yawError    = normalizeAngle(_poseTargetHeading - currentYaw());
-
-      if (std::fabs(yawError) > kHeadingTolRad) {
-        double radians   = yawError;
-        double arcCm     = radians * (DT_TRACK_WIDTH_CM * 0.5);
-        long   stepDelta = cnv_CMToSteps(arcCm);
-        if (stepDelta == 0) {
-          _posePhase = PosePhase::DriveStraight;
-          return;
-        }
-
-        double requestedSpeedSteps =
-          (_turnMaxSpeedDegPerSec > 0.0)
-            ? std::fabs(_turnMaxSpeedDegPerSec) * kDegToRad *
-                (DT_TRACK_WIDTH_CM * 0.5) * StepsPerCM
-            : 0.0;
-        double requestedAccelSteps =
-          (_turnAccelDegPerSec2 > 0.0)
-            ? std::fabs(_turnAccelDegPerSec2) * kDegToRad *
-                (DT_TRACK_WIDTH_CM * 0.5) * StepsPerCM
-            : 0.0;
-
-        int32_t maxSpeedSteps = clampSpeedSteps(
-          requestedSpeedSteps, static_cast<double>(MOTOR_MAX_SPEED));
-        int32_t accelSteps = clampSpeedSteps(
-          requestedAccelSteps, static_cast<double>(MOTOR_MAX_ACCEL));
-
-        issueTurnCommand(
-          stepDelta, maxSpeedSteps, accelSteps, Mode::MoveToPose);
-        return;
-      }
-
-      long stepDelta = cnv_CMToSteps(distance);
-      if (stepDelta == 0) {
-        _posePhase = PosePhase::FinalTurn;
-        return;
-      }
-
-      double requestedSpeedSteps = (_linearMaxSpeedCmPerSec > 0.0)
-                                     ? _linearMaxSpeedCmPerSec * StepsPerCM
-                                     : 0.0;
-      double requestedAccelSteps = (_linearAccelCmPerSec2 > 0.0)
-                                     ? _linearAccelCmPerSec2 * StepsPerCM
-                                     : 0.0;
-
-      int32_t maxSpeedSteps = clampSpeedSteps(
-        requestedSpeedSteps, static_cast<double>(MOTOR_MAX_SPEED));
-      int32_t accelSteps = clampSpeedSteps(
-        requestedAccelSteps, static_cast<double>(MOTOR_MAX_ACCEL));
-
-      issueDriveCommand(stepDelta, maxSpeedSteps, accelSteps, Mode::MoveToPose);
-      _posePhase = PosePhase::DriveStraight;
-      return;
+void DifferentialDrive::updatePose(long   deltaLeft,
+                                   long   deltaRight,
+                                   double dtSeconds) {
+  if (_filter) {
+    _filter->predict(deltaLeft, deltaRight, dtSeconds);
+    if (_imu && _imu->isReady()) {
+      Rotation *rot = _imu->getRotation();
+      if (rot) { _filter->updateWithIMUYaw(rot->getYawRads()); }
     }
-
-    case PosePhase::DriveStraight: {
-      if (_subAction == SubAction::Driving) {
-        if (!leftBusy && !rightBusy) {
-          _subAction = SubAction::None;
-        } else {
-          return;
-        }
-      }
-
-      if (_subAction != SubAction::None) { return; }
-
-      double finalError = normalizeAngle(_poseFinalYaw - currentYaw());
-      if (std::fabs(finalError) <= kHeadingTolRad) {
-        finishSequence();
-        return;
-      }
-
-      double radians   = finalError;
-      double arcCm     = radians * (DT_TRACK_WIDTH_CM * 0.5);
-      long   stepDelta = cnv_CMToSteps(arcCm);
-      if (stepDelta == 0) {
-        finishSequence();
-        return;
-      }
-
-      double requestedSpeedSteps = (_turnMaxSpeedDegPerSec > 0.0)
-                                     ? std::fabs(_turnMaxSpeedDegPerSec) *
-                                         kDegToRad * (DT_TRACK_WIDTH_CM * 0.5) *
-                                         StepsPerCM
-                                     : 0.0;
-      double requestedAccelSteps = (_turnAccelDegPerSec2 > 0.0)
-                                     ? std::fabs(_turnAccelDegPerSec2) *
-                                         kDegToRad * (DT_TRACK_WIDTH_CM * 0.5) *
-                                         StepsPerCM
-                                     : 0.0;
-
-      int32_t maxSpeedSteps = clampSpeedSteps(
-        requestedSpeedSteps, static_cast<double>(MOTOR_MAX_SPEED));
-      int32_t accelSteps = clampSpeedSteps(
-        requestedAccelSteps, static_cast<double>(MOTOR_MAX_ACCEL));
-
-      issueTurnCommand(stepDelta, maxSpeedSteps, accelSteps, Mode::MoveToPose);
-      _posePhase = PosePhase::FinalTurn;
-      return;
-    }
-
-    case PosePhase::FinalTurn: {
-      if (_subAction == SubAction::Turning) {
-        if (!leftBusy && !rightBusy) {
-          _subAction = SubAction::None;
-        } else {
-          return;
-        }
-      }
-
-      if (_subAction != SubAction::None) { return; }
-
-      double finalError = normalizeAngle(_poseFinalYaw - currentYaw());
-      if (std::fabs(finalError) <= kHeadingTolRad) {
-        finishSequence();
-        return;
-      }
-
-      double radians   = finalError;
-      double arcCm     = radians * (DT_TRACK_WIDTH_CM * 0.5);
-      long   stepDelta = cnv_CMToSteps(arcCm);
-      if (stepDelta == 0) {
-        finishSequence();
-        return;
-      }
-
-      double requestedSpeedSteps = (_turnMaxSpeedDegPerSec > 0.0)
-                                     ? std::fabs(_turnMaxSpeedDegPerSec) *
-                                         kDegToRad * (DT_TRACK_WIDTH_CM * 0.5) *
-                                         StepsPerCM
-                                     : 0.0;
-      double requestedAccelSteps = (_turnAccelDegPerSec2 > 0.0)
-                                     ? std::fabs(_turnAccelDegPerSec2) *
-                                         kDegToRad * (DT_TRACK_WIDTH_CM * 0.5) *
-                                         StepsPerCM
-                                     : 0.0;
-
-      int32_t maxSpeedSteps = clampSpeedSteps(
-        requestedSpeedSteps, static_cast<double>(MOTOR_MAX_SPEED));
-      int32_t accelSteps = clampSpeedSteps(
-        requestedAccelSteps, static_cast<double>(MOTOR_MAX_ACCEL));
-
-      issueTurnCommand(stepDelta, maxSpeedSteps, accelSteps, Mode::MoveToPose);
-      return;
-    }
-  }
-}
-
-void DifferentialDrive::issueDriveCommand(long    stepDelta,
-                                          int32_t maxSpeedSteps,
-                                          int32_t accelSteps,
-                                          Mode    commandMode) {
-  _mode        = commandMode;
-  _subAction   = SubAction::Driving;
-  _headingHold = currentYaw();
-
-  _baseLeftTarget  = _left.currentPosition() + stepDelta;
-  _baseRightTarget = _right.currentPosition() + stepDelta;
-
-  Serial1.println("Issuing drive command: steps=");
-  Serial1.println(stepDelta);
-
-  _left.moveBy(stepDelta, maxSpeedSteps, accelSteps);
-  _right.moveBy(stepDelta, maxSpeedSteps, accelSteps);
-}
-
-void DifferentialDrive::issueTurnCommand(long    stepDelta,
-                                         int32_t maxSpeedSteps,
-                                         int32_t accelSteps,
-                                         Mode    commandMode) {
-  _mode        = commandMode;
-  _subAction   = SubAction::Turning;
-  _headingHold = currentYaw();
-
-  _baseLeftTarget  = _left.currentPosition() - stepDelta;
-  _baseRightTarget = _right.currentPosition() + stepDelta;
-
-  _left.moveBy(-stepDelta, maxSpeedSteps, accelSteps);
-  _right.moveBy(stepDelta, maxSpeedSteps, accelSteps);
-}
-
-void DifferentialDrive::updateFilter(long   deltaLeft,
-                                     long   deltaRight,
-                                     double dtSeconds) {
-  if (!_filter) {
-    double leftCm   = cnv_stepsToCM(deltaLeft);
-    double rightCm  = cnv_stepsToCM(deltaRight);
-    double dCenter  = 0.5 * (leftCm + rightCm);
-    double dTheta   = (rightCm - leftCm) / DT_TRACK_WIDTH_CM;
-    double theta    = _pose.rot.getYawRads();
-    double thetaMid = theta + 0.5 * dTheta;
-
-    _pose.x += dCenter * std::cos(thetaMid);
-    _pose.y += dCenter * std::sin(thetaMid);
-    _pose.rot.setYawRads(normalizeAngle(theta + dTheta));
+    _pose = _filter->getPoseEstimate();
     return;
   }
 
-  if (deltaLeft != 0 || deltaRight != 0 || dtSeconds > 0.0) {
-    _filter->predict(deltaLeft, deltaRight, dtSeconds);
+  double dl      = cnv_stepsToCM(deltaLeft);
+  double dr      = cnv_stepsToCM(deltaRight);
+  double dCenter = 0.5 * (dl + dr);
+  double dTheta  = (dr - dl) / DT_TRACK_WIDTH_CM;
+
+  double theta    = _pose.rot.getYawRads();
+  double thetaMid = theta + 0.5 * dTheta;
+  _pose.x += dCenter * std::cos(thetaMid);
+  _pose.y += dCenter * std::sin(thetaMid);
+  _pose.rot.setYawRads(normalizeAngle(theta + dTheta));
+
+  if (_imu && _imu->isReady()) {
+    Rotation *rot = _imu->getRotation();
+    if (rot) { _pose.rot.setYawRads(rot->getYawRads()); }
   }
-
-  Rotation *imuRot = _imu->getRotation();
-  if (imuRot) { _filter->updateWithIMUYaw(imuRot->getYawRads()); }
-
-  _pose = _filter->getPoseEstimate();
 }
 
-double DifferentialDrive::currentYaw() const { return _pose.rot.yaw; }
+void DifferentialDrive::updatePoseSequence() {
+  if (!_poseModeActive) { return; }
+  if (_left.isBusy() || _right.isBusy()) { return; }
+
+  switch (_poseStage) {
+    case PoseStage::RotateToHeading: {
+      double dx       = _poseTarget.x - _pose.x;
+      double dy       = _poseTarget.y - _pose.y;
+      double distance = std::sqrt(dx * dx + dy * dy);
+      if (distance <= _poseToleranceCm) {
+        _poseStage = PoseStage::FinalRotate;
+        return;
+      }
+
+      double desiredHeading = std::atan2(dy, dx);
+      double yaw            = currentYaw();
+      double headingError   = normalizeAngle(desiredHeading - yaw);
+
+      if (std::fabs(headingError) <= _poseToleranceRad) {
+        _poseStage = PoseStage::Translate;
+        return;
+      }
+
+      turnDegrees(headingError * kRadToDeg, _poseTurnSpeed);
+      break;
+    }
+
+    case PoseStage::Translate: {
+      double dx       = _poseTarget.x - _pose.x;
+      double dy       = _poseTarget.y - _pose.y;
+      double distance = std::sqrt(dx * dx + dy * dy);
+      if (distance <= _poseToleranceCm) {
+        _poseStage = PoseStage::FinalRotate;
+        return;
+      }
+
+      double desiredHeading = std::atan2(dy, dx);
+      double yaw            = currentYaw();
+      double headingError   = normalizeAngle(desiredHeading - yaw);
+      if (std::fabs(headingError) > _poseToleranceRad) {
+        _poseStage = PoseStage::RotateToHeading;
+        return;
+      }
+
+      driveStraight(distance, _poseLinearSpeed);
+      break;
+    }
+
+    case PoseStage::FinalRotate: {
+      double targetYaw = _poseTarget.rot.getYawRads();
+      double yaw       = currentYaw();
+      double error     = normalizeAngle(targetYaw - yaw);
+
+      if (std::fabs(error) <= _poseToleranceRad) {
+        _poseModeActive = false;
+        _poseStage      = PoseStage::Idle;
+        stop(false);
+        return;
+      }
+
+      turnDegrees(error * kRadToDeg, _poseTurnSpeed);
+      break;
+    }
+
+    case PoseStage::Idle:
+    default:
+      _poseModeActive = false;
+      _poseStage      = PoseStage::Idle;
+      break;
+  }
+}
+
+void DifferentialDrive::refreshHeadingHold() { _headingHold = currentYaw(); }
+
+double DifferentialDrive::currentYaw() {
+  if (_filter) { return _filter->getYaw(); }
+  return _pose.rot.getYawRads();
+}
+
+double DifferentialDrive::degToRad(double deg) { return deg * kDegToRad; }
 
 double DifferentialDrive::normalizeAngle(double angle) {
-  while (angle > PI) { angle -= TWO_PI; }
-  while (angle < -PI) { angle += TWO_PI; }
-
+  while (angle > PI) angle -= TWO_PI;
+  while (angle < -PI) angle += TWO_PI;
   return angle;
-}
-
-int32_t DifferentialDrive::clampSpeedSteps(double  requested,
-                                           double  defaultValue,
-                                           int32_t minValue) {
-  double value = (requested > 0.0) ? requested : defaultValue;
-  if (value < static_cast<double>(minValue)) {
-    value = static_cast<double>(minValue);
-  }
-  int32_t steps = static_cast<int32_t>(std::lround(value));
-  if (steps < minValue) { steps = minValue; }
-  return steps;
 }

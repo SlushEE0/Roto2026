@@ -10,17 +10,15 @@
 HardwareTimer fastLoopTimer(TIM1);
 
 HardwareTimer stepperTimerR(TIM2);
-HardwareTimer stepperTimerL(TIM4);
+HardwareTimer stepperTimerL(TIM3);
 
 BNO imu;
 
-Stepper stepper_r(&stepperTimerR, E0_STEP_PIN, E0_DIR_PIN, E0_ENABLE_PIN, true);
-Stepper stepper_l(&stepperTimerL, Z_STEP_PIN, Z_DIR_PIN, Z_ENABLE_PIN, false);
+Stepper stepper_r(&stepperTimerR, X_STEP_PIN, X_DIR_PIN, X_ENABLE_PIN, true);
+Stepper stepper_l(&stepperTimerL, E0_STEP_PIN, E0_DIR_PIN, E0_ENABLE_PIN, false);
 
 Kalman            kalmanFilter;
 DifferentialDrive drivetrain(stepper_l, stepper_r, &kalmanFilter, &imu);
-
-static unsigned long lastUpdateMicros = 0;
 
 void fastLoop() {
   imu.update();
@@ -36,6 +34,8 @@ void setup() {
 
   stepper_r.begin(1000000UL);
   stepper_l.begin(1000000UL);
+  stepper_r.setMaxSpeed(MOTOR_MAX_SPEED);
+  stepper_l.setMaxSpeed(MOTOR_MAX_SPEED);
 
   while (!imu.connect(BNO_SDA_PIN, BNO_SCL_PIN, BNO_INT_PIN, BNO_RST_PIN)) {
     Serial1.println("[INIT] Retrying BNO connection...");
@@ -52,9 +52,7 @@ void setup() {
   delay(500);
 
   drivetrain.resetPose();
-  drivetrain.queueDriveStraight(100.0, 20.0, 50.0);
-  drivetrain.queueTurn(90.0, 45.0, 90.0);
-  drivetrain.queueDriveStraight(50.0, 20.0, 50.0);
+  drivetrain.moveToPose(Pose(100.0, 0, Rotation::kZero()), 25.0, 60.0);
 }
 
 void loop() {

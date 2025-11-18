@@ -72,6 +72,10 @@ class Rotation {
   double pitch = 0; // rotation around y-axis
   double yaw   = 0; // rotation around z-axis
 
+  static Rotation kZero() {
+    return Rotation(0.0, 0.0, 0.0);
+  }
+
   double normalizeAngleRads(double angle) {
     while (angle > PI) angle -= TWO_PI;
     while (angle < -PI) angle += TWO_PI;

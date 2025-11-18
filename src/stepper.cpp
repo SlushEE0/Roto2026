@@ -1,7 +1,15 @@
 #include "stepper.h"
+
 #include <math.h>
 
-#define STEP_PULSE_WIDTH_US 2
+#include <config.h>
+
+namespace {
+constexpr uint32_t kStepPulseWidthUs = 3;
+constexpr float    kSpeedEpsilon     = 1e-3f;
+constexpr uint32_t kPrimeDelayUs     = 5;
+constexpr uint32_t kMinOffTimeUs     = 1;
+} // namespace
 
 Stepper::Stepper(HardwareTimer *timer,
                  uint8_t        stepPin,
@@ -15,104 +23,150 @@ Stepper::Stepper(HardwareTimer *timer,
     _invertDir(invertDir),
     _currentPosition(0),
     _targetPosition(0),
-    _currentSpeed(0.0f),
-    _maxSpeed(0.0f),
+    _commandVelocity(0.0f),
+    _maxSpeed(
+      static_cast<float>(MOTOR_MAX_SPEED > 0 ? MOTOR_MAX_SPEED : 20000)),
     _acceleration(0.0f),
     _stepIntervalUs(0),
     _running(false),
     _stepPinIsHigh(false),
-    _directionSign(1) {}
+    _directionSign(1),
+    _mode(static_cast<uint8_t>(Mode::Idle)) {}
 
 void Stepper::begin(uint32_t timerFreqHz) {
   pinMode(_stepPin, OUTPUT);
   pinMode(_dirPin, OUTPUT);
   pinMode(_enablePin, OUTPUT);
   digitalWrite(_stepPin, LOW);
-  disable();
+  digitalWrite(_dirPin, LOW);
+  digitalWrite(_enablePin, HIGH);
 
   if (timerFreqHz == 0) timerFreqHz = 1000000UL;
-  uint32_t prescale = (SystemCoreClock / timerFreqHz) - 1;
+
+  uint32_t prescale = SystemCoreClock / timerFreqHz;
+  if (prescale == 0) prescale = 1;
+  uint32_t actualFreq = SystemCoreClock / prescale;
+  while (actualFreq > timerFreqHz && prescale < 0xFFFF) {
+    ++prescale;
+    actualFreq = SystemCoreClock / prescale;
+  }
+  if (prescale > 0) prescale -= 1;
+
   _timer->setPrescaleFactor(prescale);
   _timer->setOverflow(1000, MICROSEC_FORMAT);
   _timer->attachInterrupt([this]() { this->handleTimerInterrupt(); });
   _timer->pause();
 
-  if (_maxSpeed <= 0.0f) _maxSpeed = 1000.0f;
-  if (_acceleration <= 0.0f) _acceleration = 1000.0f;
+  stop(true);
 }
 
 void Stepper::enable() { digitalWrite(_enablePin, LOW); }
 
-void Stepper::disable() {
-  _running = false;
+void Stepper::disable() { stop(true); }
+
+void Stepper::stop(bool disableDriver) {
+  noInterrupts();
+  _running         = false;
+  _mode            = static_cast<uint8_t>(Mode::Idle);
+  _commandVelocity = 0.0f;
+  _targetPosition  = _currentPosition;
+  _stepPinIsHigh   = false;
+  interrupts();
+
   _timer->pause();
   digitalWrite(_stepPin, LOW);
-  digitalWrite(_enablePin, HIGH);
+  if (disableDriver) { digitalWrite(_enablePin, HIGH); }
 }
 
 void Stepper::setMaxSpeed(float stepsPerSecond) {
-  if (stepsPerSecond <= 0.0f) return;
-  _maxSpeed = stepsPerSecond;
+  if (stepsPerSecond > 0.0f) { _maxSpeed = stepsPerSecond; }
 }
 
-void Stepper::setAcceleration(float stepsPerSecondSquared) {
-  if (stepsPerSecondSquared <= 0.0f) return;
-  _acceleration = stepsPerSecondSquared;
+void Stepper::commandRelative(int32_t stepDelta, float speedStepsPerSec) {
+  int32_t current;
+  noInterrupts();
+  current = _currentPosition;
+  interrupts();
+  commandPosition(current + stepDelta, speedStepsPerSec);
 }
 
-void Stepper::setTarget(int32_t targetPosition) {
-  _targetPosition = targetPosition;
-  if (_running) return;
-  moveTo(targetPosition,
-         static_cast<int32_t>(_maxSpeed),
-         static_cast<int32_t>(_acceleration));
-}
-
-void Stepper::moveTo(int32_t targetPosition,
-                     int32_t maxSpeedStepsPerSec,
-                     int32_t accelStepsPerSec2) {
-  if (maxSpeedStepsPerSec != 0) {
-    _maxSpeed = static_cast<float>(abs(maxSpeedStepsPerSec));
+void Stepper::commandPosition(int32_t targetPosition, float speedStepsPerSec) {
+  if (speedStepsPerSec <= 0.0f) {
+    speedStepsPerSec = (_maxSpeed > 0.0f) ? _maxSpeed : fabsf(speedStepsPerSec);
+    if (speedStepsPerSec <= 0.0f) speedStepsPerSec = 1000.0f;
   }
-  if (_maxSpeed <= 0.0f) _maxSpeed = 1000.0f;
-
-  if (accelStepsPerSec2 != 0) {
-    _acceleration = static_cast<float>(abs(accelStepsPerSec2));
+  if (_maxSpeed > 0.0f && speedStepsPerSec > _maxSpeed) {
+    speedStepsPerSec = _maxSpeed;
   }
-  if (_acceleration <= 0.0f) _acceleration = _maxSpeed * 2.0f;
 
+  enable();
+
+  uint32_t interval = intervalFromSpeed(speedStepsPerSec);
+
+  noInterrupts();
   _targetPosition = targetPosition;
+  int32_t delta   = _targetPosition - _currentPosition;
 
-  int32_t delta = _targetPosition - _currentPosition;
   if (delta == 0) {
-    _running      = false;
-    _currentSpeed = 0.0f;
+    _mode            = static_cast<uint8_t>(Mode::Idle);
+    _commandVelocity = 0.0f;
+    _running         = false;
+    interrupts();
     _timer->pause();
     digitalWrite(_stepPin, LOW);
     return;
   }
 
+  int8_t direction = (delta > 0) ? 1 : -1;
+  bool   start = !_running || (_mode != static_cast<uint8_t>(Mode::Position));
+
+  _mode            = static_cast<uint8_t>(Mode::Position);
+  _commandVelocity = speedStepsPerSec * static_cast<float>(direction);
+  _stepIntervalUs  = interval;
+  _running         = true;
+  if (start) { _stepPinIsHigh = false; }
+  applyDirection(direction);
+  interrupts();
+
+  if (start) { primeTimer(kPrimeDelayUs); }
+}
+
+void Stepper::commandVelocity(float stepsPerSecond) {
+  if (_maxSpeed > 0.0f) {
+    if (stepsPerSecond > _maxSpeed) stepsPerSecond = _maxSpeed;
+    if (stepsPerSecond < -_maxSpeed) stepsPerSecond = -_maxSpeed;
+  }
+
+  if (fabsf(stepsPerSecond) < kSpeedEpsilon) {
+    stop(false);
+    return;
+  }
+
   enable();
 
-  if (!_running) {
-    _stepPinIsHigh = false;
-    _currentSpeed  = 0.0f;
-    applyDirection(delta > 0 ? 1 : -1);
+  float    magnitude = fabsf(stepsPerSecond);
+  uint32_t interval  = intervalFromSpeed(magnitude);
+  int8_t   direction = (stepsPerSecond > 0.0f) ? 1 : -1;
 
-    if (_acceleration > 0.0f) {
-      float firstInterval = sqrtf(2.0f / _acceleration) * 1000000.0f;
-      _stepIntervalUs     = static_cast<uint32_t>(firstInterval);
-    } else {
-      _stepIntervalUs = static_cast<uint32_t>(1000000.0f / _maxSpeed);
-    }
+  noInterrupts();
+  bool start = !_running || (_mode != static_cast<uint8_t>(Mode::Velocity));
+  _mode      = static_cast<uint8_t>(Mode::Velocity);
+  _commandVelocity = stepsPerSecond;
+  _stepIntervalUs  = interval;
+  _running         = true;
+  if (start) { _stepPinIsHigh = false; }
+  applyDirection(direction);
+  interrupts();
 
-    if (_stepIntervalUs < (STEP_PULSE_WIDTH_US + 2)) {
-      _stepIntervalUs = STEP_PULSE_WIDTH_US + 2;
-    }
+  if (start) { primeTimer(kPrimeDelayUs); }
+}
 
-    _running = true;
-    primeTimer(5);
-  }
+uint32_t Stepper::intervalFromSpeed(float stepsPerSecond) const {
+  if (stepsPerSecond < 1.0f) stepsPerSecond = 1.0f;
+  float interval = 1000000.0f / stepsPerSecond;
+  float minUs    = static_cast<float>(kStepPulseWidthUs + 1);
+  if (interval < minUs) interval = minUs;
+  return static_cast<uint32_t>(interval);
 }
 
 void Stepper::applyDirection(int8_t dir) {
@@ -130,69 +184,28 @@ void Stepper::primeTimer(uint32_t periodUs) {
   _timer->resume();
 }
 
-bool Stepper::planNextStep() {
-  int32_t delta = _targetPosition - _currentPosition;
-  if (delta == 0) {
-    _currentSpeed = 0.0f;
-    return false;
-  }
-
-  int8_t desiredDir = (delta > 0) ? 1 : -1;
-
-  if (_currentSpeed == 0.0f) { applyDirection(desiredDir); }
-
-  float speedMag = fabsf(_currentSpeed);
-  float dt       = (_stepIntervalUs > 0)
-                     ? (static_cast<float>(_stepIntervalUs) * 1e-6f)
-                     : ((_acceleration > 0.0f) ? sqrtf(2.0f / _acceleration)
-                                               : (1.0f / _maxSpeed));
-
-  if (_acceleration <= 0.0f) {
-    speedMag = _maxSpeed;
-  } else {
-    float  stepsRemaining = static_cast<float>(abs(delta));
-    float  stepsToStop    = (speedMag * speedMag) / (2.0f * _acceleration);
-    int8_t speedDir =
-      (_currentSpeed > 0.0f) ? 1 : (_currentSpeed < 0.0f ? -1 : 0);
-
-    if (speedDir != 0 && speedDir != desiredDir) {
-      speedMag -= _acceleration * dt;
-      if (speedMag < 0.0f) speedMag = 0.0f;
-      if (speedMag == 0.0f) { applyDirection(desiredDir); }
-    } else {
-      if (stepsToStop >= stepsRemaining) {
-        speedMag -= _acceleration * dt;
-        if (speedMag < 0.0f) speedMag = 0.0f;
-      } else if (speedMag < _maxSpeed) {
-        speedMag += _acceleration * dt;
-        if (speedMag > _maxSpeed) speedMag = _maxSpeed;
-      }
-    }
-  }
-
-  if (speedMag < 0.5f) { speedMag = 0.5f; }
-
-  _currentSpeed = speedMag * static_cast<float>(_directionSign);
-
-  float interval = 1000000.0f / speedMag;
-  if (interval < (STEP_PULSE_WIDTH_US + 2)) {
-    interval = STEP_PULSE_WIDTH_US + 2;
-  }
-  _stepIntervalUs = static_cast<uint32_t>(interval);
-  return true;
+void Stepper::hardStopFromISR() {
+  _running         = false;
+  _mode            = static_cast<uint8_t>(Mode::Idle);
+  _commandVelocity = 0.0f;
+  _targetPosition  = _currentPosition;
+  _stepPinIsHigh   = false;
+  _timer->pause();
+  digitalWrite(_stepPin, LOW);
 }
 
 void Stepper::handleTimerInterrupt() {
   if (!_running) {
     _timer->pause();
     digitalWrite(_stepPin, LOW);
+    _stepPinIsHigh = false;
     return;
   }
 
   if (!_stepPinIsHigh) {
     digitalWrite(_stepPin, HIGH);
     _stepPinIsHigh = true;
-    primeTimer(STEP_PULSE_WIDTH_US);
+    primeTimer(kStepPulseWidthUs);
     return;
   }
 
@@ -200,15 +213,30 @@ void Stepper::handleTimerInterrupt() {
   _stepPinIsHigh = false;
   _currentPosition += _directionSign;
 
-  if (!planNextStep()) {
-    _running      = false;
-    _currentSpeed = 0.0f;
-    _timer->pause();
+  if (_mode == static_cast<uint8_t>(Mode::Position)) {
+    if (_currentPosition == _targetPosition) {
+      hardStopFromISR();
+      return;
+    }
+    int32_t remaining = _targetPosition - _currentPosition;
+    int8_t  desired   = (remaining > 0) ? 1 : -1;
+    if (desired != _directionSign) { applyDirection(desired); }
+  } else if (_mode == static_cast<uint8_t>(Mode::Velocity)) {
+    float commanded = _commandVelocity;
+    if (fabsf(commanded) < kSpeedEpsilon) {
+      hardStopFromISR();
+      return;
+    }
+    int8_t desired = (commanded > 0.0f) ? 1 : -1;
+    if (desired != _directionSign) { applyDirection(desired); }
+  } else {
+    hardStopFromISR();
     return;
   }
 
-  uint32_t offTime = (_stepIntervalUs > STEP_PULSE_WIDTH_US)
-                       ? (_stepIntervalUs - STEP_PULSE_WIDTH_US)
-                       : 1;
+  uint32_t interval = _stepIntervalUs;
+  uint32_t offTime  = (interval > kStepPulseWidthUs)
+                        ? (interval - kStepPulseWidthUs)
+                        : kMinOffTimeUs;
   primeTimer(offTime);
 }

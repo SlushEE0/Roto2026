@@ -6,53 +6,33 @@
 #include "utils.h"
 
 #include <cstddef>
-#include <deque>
+#include <cstdint>
 
 class DifferentialDrive {
     public:
-  enum class Mode { Idle = 0, DrivingStraight, Turning, MoveToPose };
-  enum class SubAction { None = 0, Driving, Turning };
-  enum class PosePhase { None = 0, RotateToHeading, DriveStraight, FinalTurn };
-  enum class MoveType { DriveStraight = 0, Turn, ToPose };
-
-  struct MoveCommand {
-    MoveType type     = MoveType::DriveStraight;
-    double   distance = 0.0; // cm
-    double   degrees  = 0.0; // deg
-    Pose     targetPose;
-    double   linearMax = 0.0; // cm/s
-    double   linearAcc = 0.0; // cm/s^2
-    double   turnMax   = 0.0; // deg/s
-    double   turnAcc   = 0.0; // deg/s^2
-  };
+  enum class Mode { Idle = 0, Velocity, Position };
+  enum class PoseStage { Idle = 0, RotateToHeading, Translate, FinalRotate };
 
   DifferentialDrive(Stepper &left,
                     Stepper &right,
-                    Kalman  *filter,
-                    BNO     *imu = nullptr);
+                    Kalman  *filter = nullptr,
+                    BNO     *imu    = nullptr);
 
   void setFilter(Kalman *filter);
   void setIMU(BNO *imu);
 
   void resetPose(const Pose &pose = Pose());
 
-  void queueDriveStraight(double distanceCm,
-                          double maxSpeedCmPerSec = 0.0,
-                          double accelCmPerSec2   = 0.0);
+  void commandVelocity(double linearCmPerSec, double angularDegPerSec);
+  void commandWheelVelocities(double leftCmPerSec, double rightCmPerSec);
 
-  void queueTurn(double degrees,
-                 double maxSpeedDegPerSec = 0.0,
-                 double accelDegPerSec2   = 0.0);
+  void driveStraight(double distanceCm, double speedCmPerSec);
+  void turnDegrees(double degrees, double speedDegPerSec);
+  void moveToPose(const Pose &target,
+                  double      linearSpeedCmPerSec,
+                  double      turnSpeedDegPerSec);
 
-  void queueMoveToPose(const Pose &target,
-                       double      linearSpeedCmPerSec,
-                       double      accelCmPerSec2,
-                       double      turnSpeedDegPerSec,
-                       double      turnAccelDegPerSec2);
-
-  void clearQueue();
-
-  void stop();
+  void stop(bool disableDrivers = false);
 
   void update();
 
@@ -60,63 +40,47 @@ class DifferentialDrive {
   RotationEuler getRotation() const { return _pose.rot.getRadians(); }
   Mode          mode() const { return _mode; }
   bool          isBusy() const;
-  size_t        queuedMoves() const;
+  double        headingHold() const { return _headingHold; }
+  void          setHeadingHoldGain(double gain) { _headingGain = gain; }
 
     private:
+  void          applyVelocityCommand(double leftCmPerSec, double rightCmPerSec);
+  void          updatePose(long deltaLeft, long deltaRight, double dtSeconds);
+  void          updatePoseSequence();
+  void          refreshHeadingHold();
+  double        currentYaw();
+  static double degToRad(double deg);
+  static double normalizeAngle(double angle);
+
   Stepper &_left;
   Stepper &_right;
   Kalman  *_filter;
   BNO     *_imu;
 
   Mode      _mode;
-  SubAction _subAction;
-  PosePhase _posePhase;
-  bool      _poseSequenceActive;
-  bool      _hasActiveCommand;
+  PoseStage _poseStage;
+  bool      _poseModeActive;
 
   Pose _pose;
+  Pose _poseTarget;
 
-  MoveCommand             _activeCommand;
-  std::deque<MoveCommand> _queue;
+  double _linearCmd;
+  double _angularCmd;
+  double _headingHold;
+  double _headingGain;
 
-  Pose   _poseTarget;
-  double _poseTargetHeading;
-  double _poseFinalYaw;
+  double _poseLinearSpeed;
+  double _poseTurnSpeed;
+  double _poseToleranceCm;
+  double _poseToleranceRad;
+
+  long _leftTarget;
+  long _rightTarget;
 
   long _prevLeftSteps;
   long _prevRightSteps;
 
-  long _baseLeftTarget;
-  long _baseRightTarget;
+  float _positionSpeedSteps;
 
   unsigned long _lastUpdateMicros;
-
-  double _turnMaxSpeedDegPerSec;
-  double _turnAccelDegPerSec2;
-  double _linearMaxSpeedCmPerSec;
-  double _linearAccelCmPerSec2;
-  double _headingHold;
-
-  void applyHeadingCorrection();
-  void updatePoseSequence(bool leftBusy, bool rightBusy);
-  void updateFilter(long deltaLeft, long deltaRight, double dtSeconds);
-  void startNextCommand();
-  bool
-  startDrive(double distanceCm, double maxSpeedCmPerSec, double accelCmPerSec2);
-  bool
-  startTurn(double degrees, double maxSpeedDegPerSec, double accelDegPerSec2);
-  bool          startPoseCommand(const MoveCommand &command);
-  void          issueDriveCommand(long    stepDelta,
-                                  int32_t maxSpeedSteps,
-                                  int32_t accelSteps,
-                                  Mode    commandMode);
-  void          issueTurnCommand(long    stepDelta,
-                                 int32_t maxSpeedSteps,
-                                 int32_t accelSteps,
-                                 Mode    commandMode);
-  void          finishActiveCommand();
-  double        currentYaw() const;
-  static double normalizeAngle(double angle);
-  static int32_t
-  clampSpeedSteps(double requested, double defaultValue, int32_t minValue = 1);
 };
