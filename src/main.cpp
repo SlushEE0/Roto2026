@@ -52,7 +52,19 @@ void setup() {
   delay(500);
 
   drivetrain.resetPose();
-  drivetrain.moveToPose(Pose(100.0, 0, Rotation::kZero()), 25.0, 60.0);
+  
+  // Example Usage:
+  // drivetrain.queueMoveToPose(Pose(100.0, 0, Rotation::kZero()), 25.0, 60.0);
+  
+  drivetrain.queueDriveStraight(48/2 + 10, 40.0);
+  drivetrain.queueTurnDegrees(90.0, 60.0);
+  drivetrain.queueDriveStraight(48, 40.0);
+  drivetrain.queueTurnDegrees(-90.0, 60.0);
+  drivetrain.queueDriveStraight(48*2, 40.0);
+  drivetrain.queueTurnDegrees(-70.0, 60.0);
+  drivetrain.queueDriveStraight(48*4, 40.0);
+  drivetrain.queueTurnDegrees(-80.0, 60.0);
+  drivetrain.queueDriveStraight(38, 40.0);
 }
 
 void loop() {
@@ -63,8 +75,8 @@ void loop() {
   Serial1.print(pose.y, 2);
   Serial1.print(" Yaw:");
   Serial1.print(pose.rot.getYawDegs(), 2);
-  Serial1.print(" deg | Mode:");
-  Serial1.println(static_cast<int>(drivetrain.mode()));
+  Serial1.print(" deg | Busy:");
+  Serial1.println(drivetrain.isBusy() ? "YES" : "NO");
 
   delay(30);
 }
