@@ -62,6 +62,14 @@ static inline float cnv_stepsToCM(long steps) {
 }
 static inline long cnv_CMToSteps(float cm) { return lroundf(cm * StepsPerCM); }
 
+static inline float clampFloat(float val, float minVal, float maxVal) {
+  if (val < minVal)
+    return minVal;
+  if (val > maxVal)
+    return maxVal;
+  return val;
+}
+
 static inline void normalizeQuat(Quaternion &q) {
   float norm = sqrtf(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
   if (norm > 0.0f) {
