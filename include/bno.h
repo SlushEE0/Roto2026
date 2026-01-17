@@ -18,7 +18,7 @@ class BNO {
   AccelData accel;
   GyroData  gyro;
   Rotation  rotation;
-  double    yawOffset;
+  float     yawOffset;
   bool      yawOffsetInitialized;
 
   BNO08x bno;
@@ -28,11 +28,11 @@ class BNO {
     isConnected    = false;
     sensorsEnabled = false;
 
-    accel                = {0.0, 0.0, 0.0};
-    gyro                 = {0.0, 0.0, 0.0};
-    rotation             = {0.0, 0.0, 0.0};
+    accel                = {0.0f, 0.0f, 0.0f};
+    gyro                 = {0.0f, 0.0f, 0.0f};
+    rotation             = {0.0f, 0.0f, 0.0f};
     yawOffsetInitialized = false;
-    yawOffset            = 0.0;
+    yawOffset            = 0.0f;
   }
 
   ~BNO() { disconnect(); }
@@ -183,21 +183,21 @@ class BNO {
       // Calibrated accelerometer → m/s^2
       if (id == SENSOR_REPORTID_ACCELEROMETER ||
           id == SENSOR_REPORTID_RAW_ACCELEROMETER) {
-        accel.x = bno.getAccelX();
-        accel.y = bno.getAccelY();
-        accel.z = bno.getAccelZ();
+        accel.x = (float)bno.getAccelX();
+        accel.y = (float)bno.getAccelY();
+        accel.z = (float)bno.getAccelZ();
       }
       // Calibrated gyro → radians/s
       else if (id == SENSOR_REPORTID_GYROSCOPE_CALIBRATED ||
                id == SENSOR_REPORTID_RAW_GYROSCOPE) {
-        gyro.x = bno.getGyroX();
-        gyro.y = bno.getGyroY();
-        gyro.z = bno.getGyroZ();
+        gyro.x = (float)bno.getGyroX();
+        gyro.y = (float)bno.getGyroY();
+        gyro.z = (float)bno.getGyroZ();
       }
       if (id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
-        rotation.setRollRads(bno.getRoll());
-        rotation.setPitchRads(bno.getPitch());
-        double rawYaw = bno.getYaw();
+        rotation.setRollRads((float)bno.getRoll());
+        rotation.setPitchRads((float)bno.getPitch());
+        float rawYaw = (float)bno.getYaw();
         if (!yawOffsetInitialized) {
           yawOffset            = rawYaw;
           yawOffsetInitialized = true;

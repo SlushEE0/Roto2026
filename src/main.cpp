@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <bno.h>
 #include <drivetrain.h>
-#include <kalman.h>
+#include <odometry.h>
 #include <stepper.h>
 #include <utils.h>
 
@@ -17,8 +17,8 @@ BNO imu;
 Stepper stepper_r(&stepperTimerR, X_STEP_PIN, X_DIR_PIN, X_ENABLE_PIN, true);
 Stepper stepper_l(&stepperTimerL, E0_STEP_PIN, E0_DIR_PIN, E0_ENABLE_PIN, false);
 
-Kalman            kalmanFilter;
-DifferentialDrive drivetrain(stepper_l, stepper_r, &kalmanFilter, &imu);
+Odometry          odometry;
+DifferentialDrive drivetrain(stepper_l, stepper_r, &odometry, &imu);
 
 void fastLoop() {
   imu.update();
@@ -26,7 +26,7 @@ void fastLoop() {
 }
 
 void setup() {
-  Serial1.begin(250000);
+  Serial1.begin(256000);
   while (!Serial1);
 
   Serial1.println("[INIT] Roto2026 Starting");
@@ -37,9 +37,13 @@ void setup() {
   stepper_r.setMaxSpeed(MOTOR_MAX_SPEED);
   stepper_l.setMaxSpeed(MOTOR_MAX_SPEED);
 
-  while (!imu.connect(BNO_SDA_PIN, BNO_SCL_PIN, BNO_INT_PIN, BNO_RST_PIN)) {
+  for (int i = 0; i < 4; i++) {
+    if(imu.connect(BNO_SDA_PIN, BNO_SCL_PIN, BNO_INT_PIN, BNO_RST_PIN)) {
+      Serial1.println("[INIT] Connected to BNO085");
+      break;
+    }
     Serial1.println("[INIT] Retrying BNO connection...");
-    delay(800);
+    delay(500);
   }
 
   Serial1.println("[INIT] Setting up fast loop");
@@ -49,31 +53,25 @@ void setup() {
   fastLoopTimer.resume();
 
   Serial1.println("[INIT] All systems ready");
-  delay(500);
+  delay(200);
 
   drivetrain.resetPose();
-  
-  // Example Usage:
-  // drivetrain.queueMoveToPose(Pose(100.0, 0, Rotation::kZero()), 25.0, 60.0);
-  
-  drivetrain.queueDriveStraight(48/2 + 10, 40.0);
-  drivetrain.queueTurnDegrees(90.0, 60.0);
-  drivetrain.queueDriveStraight(48, 40.0);
-  drivetrain.queueTurnDegrees(-90.0, 60.0);
-  drivetrain.queueDriveStraight(48*2, 40.0);
-  drivetrain.queueTurnDegrees(-70.0, 60.0);
-  drivetrain.queueDriveStraight(48*4, 40.0);
-  drivetrain.queueTurnDegrees(-80.0, 60.0);
-  drivetrain.queueDriveStraight(38, 40.0);
+
+  // Example: Move to absolute poses using EKF odometry feedback
+  // queueMoveToPose(targetPose, linearSpeed_cm/s, turnSpeed_deg/s)
+  drivetrain.queueMoveToPose(Pose(34.0f, 0.0f, Rotation(0,0,90.0f)), 60.0f, 120.0f);       // Forward 34 cm
+  drivetrain.queueMoveToPose(Pose(34.0f, 48.0f, Rotation::kZero()), 60.0f, 120.0f);      // Left 48 cm (90° turn + drive)
+  drivetrain.queueMoveToPose(Pose(130.0f, 48.0f, Rotation::kZero()), 60.0f, 120.0f);     // Forward 96 cm
+  drivetrain.queueMoveToPose(Pose(250.0f, -50.0f, Rotation::kZero()), 60.0f, 120.0f);    // Diagonal move
 }
 
 void loop() {
   Pose pose = drivetrain.getPose();
   Serial1.print("Pose X:");
   Serial1.print(pose.x, 2);
-  Serial1.print(" Y:");
+  Serial1.print(", Y:");
   Serial1.print(pose.y, 2);
-  Serial1.print(" Yaw:");
+  Serial1.print(", Yaw:");
   Serial1.print(pose.rot.getYawDegs(), 2);
   Serial1.print(" deg | Busy:");
   Serial1.println(drivetrain.isBusy() ? "YES" : "NO");

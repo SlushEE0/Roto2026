@@ -1,7 +1,8 @@
 #pragma once
 
 #include "bno.h"
-#include "kalman.h"
+#include "odometry.h"
+#include "pid.h"
 #include "stepper.h"
 #include "utils.h"
 
@@ -20,7 +21,6 @@ struct Trajectory {
 // Command types
 enum class DrivetrainCommandType {
   Idle,
-  DriveStraight,
   TurnDegrees,
   MoveToPose,
   FollowTrajectory
@@ -29,85 +29,83 @@ enum class DrivetrainCommandType {
 // Unified command structure
 struct DrivetrainCommand {
   DrivetrainCommandType type;
-  union {
-    struct {
-      double distCm;
-      double speedCmPerSec;
-    } straight;
-    struct {
-      double degrees;
-      double speedDegPerSec;
-    } turn;
-    struct {
-      Pose   target;
-      double linearSpeed;
-      double turnSpeed;
-    } pose;
-    struct {
-      const Pose *points;
-      std::size_t count;
-      double      linearSpeed;
-      double      turnSpeed;
-      std::size_t currentIndex; // To track progress within the trajectory
-    } trajectory;
-  } data;
+  
+  // Using separate structs instead of union to avoid non-trivial constructor issues
+  // Only one of these is valid at a time, determined by 'type'
+  struct {
+    float degrees;
+    float speedDegPerSec;
+  } turn;
+  struct {
+    float  targetX;
+    float  targetY;
+    float  targetYaw;
+    float  linearSpeed;
+    float  turnSpeed;
+  } pose;
+  struct {
+    const Pose *points;
+    std::size_t count;
+    float       linearSpeed;
+    float       turnSpeed;
+    std::size_t currentIndex; // To track progress within the trajectory
+  } trajectory;
 
-  DrivetrainCommand() : type(DrivetrainCommandType::Idle) {}
+  DrivetrainCommand() : type(DrivetrainCommandType::Idle) {
+    turn = {0.0f, 0.0f};
+    pose = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    trajectory = {nullptr, 0, 0.0f, 0.0f, 0};
+  }
 };
 
 class DifferentialDrive {
     public:
-  DifferentialDrive(Stepper &left,
-                    Stepper &right,
-                    Kalman  *filter = nullptr,
-                    BNO     *imu    = nullptr);
+  DifferentialDrive(Stepper  &left,
+                    Stepper  &right,
+                    Odometry *filter = nullptr,
+                    BNO      *imu    = nullptr);
 
   // Configuration
-  void setFilter(Kalman *filter);
+  void setFilter(Odometry *filter);
   void setIMU(BNO *imu);
-  void setGains(double headingGain, double distanceGain);
+  void setLinearPID(float kP, float kI, float kD);
+  void setAngularPID(float kP, float kI, float kD);
 
   // State Management
-  void   resetPose(const Pose &pose = Pose());
-  void   stop(); // Clears queue and stops motors
-  void   update();
-  bool   isBusy() const;
-  Pose   getPose() const;
-  double getHeading() const;
+  void  resetPose(const Pose &pose = Pose());
+  void  stop(); // Clears queue and stops motors
+  void  update();
+  bool  isBusy() const;
+  Pose  getPose() const;
+  float getHeading() const;
 
   // Command Queueing
-  bool queueDriveStraight(double distanceCm, double speedCmPerSec);
-  bool queueTurnDegrees(double degrees, double speedDegPerSec);
+  bool queueTurnDegrees(float degrees, float speedDegPerSec);
   bool queueMoveToPose(const Pose &target,
-                       double      linearSpeed,
-                       double      turnSpeed);
+                       float       linearSpeed,
+                       float       turnSpeed);
   bool queueFollowTrajectory(const Trajectory &traj,
-                             double            linearSpeed,
-                             double            turnSpeed);
+                             float             linearSpeed,
+                             float             turnSpeed);
 
     private:
   // Control Loop Handlers
   void processCommand();
-  void handleDriveStraight();
   void handleTurnDegrees();
   void handleMoveToPose();
   void handleFollowTrajectory();
 
   // Low-level helpers
-  void   setWheelVelocities(double leftCmPerSec, double rightCmPerSec);
-  double getDistanceTraveled(long startLeft,
-                             long startRight,
-                             long currentLeft,
-                             long currentRight);
-  double normalizeAngle(double angle);
-  double degToRad(double deg);
-  double radToDeg(double rad);
+  void  setWheelVelocities(float leftCmPerSec, float rightCmPerSec);
+  float normalizeAngle(float angle);
+  float degToRad(float deg);
+  float radToDeg(float rad);
 
   // Member Variables
-  Stepper &_left;
-  Stepper &_right;
-  Kalman  *_filter;
-  BNO     *_imu;
+  Stepper  &_left;
+  Stepper  &_right;
+  Odometry *_filter;
+  BNO      *_imu;
 
   // Queue
   DrivetrainCommand _queue[kDrivetrainQueueSize];
@@ -120,14 +118,14 @@ class DifferentialDrive {
   bool              _isExecuting;
 
   // Control State
-  Pose   _startPose;
-  long   _startLeftSteps;
-  long   _startRightSteps;
-  double _targetHeading;
+  Pose  _startPose;
+  long  _startLeftSteps;
+  long  _startRightSteps;
+  float _targetHeading;
   
-  // Gains
-  double _headingGain;  // For straight driving correction
-  double _turnGain;     // For turning control
+  // PID Controllers
+  PIDController _linearPID;   // For distance control
+  PIDController _angularPID;  // For heading/turning control
   
   // Internal sub-state for complex moves (MoveToPose)
   enum class SubState {

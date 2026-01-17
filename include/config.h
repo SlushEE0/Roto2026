@@ -48,8 +48,8 @@
 #define MICROSTEPS 16
 #define STEPS_PER_REV (200 * MICROSTEPS)
 
-#define DT_TRACK_WIDTH_CM 17.3
-#define WHEEL_DIAMETER_CM 8
+#define DT_TRACK_WIDTH_CM 16
+#define WHEEL_DIAMETER_CM 7.3025
 
 #define MOTOR_MAX_ACCEL 36000 // steps/sec^2
 #define MOTOR_MAX_SPEED 20000 // steps/sec

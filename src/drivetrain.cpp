@@ -7,11 +7,11 @@
 #endif
 
 namespace {
-constexpr double kDegToRad          = PI / 180.0;
-constexpr double kRadToDeg          = 180.0 / PI;
-constexpr double kVelocityEpsilon   = 1e-3;
-constexpr double kPoseDistanceTolCm = 1.0;
-constexpr double kPoseHeadingTolRad = 2.0 * kDegToRad;
+constexpr float kDegToRad          = PI_F / 180.0f;
+constexpr float kRadToDeg          = 180.0f / PI_F;
+constexpr float kVelocityEpsilon   = 1e-3f;
+constexpr float kPoseDistanceTolCm = 1.0f;
+constexpr float kPoseHeadingTolRad = 2.0f * kDegToRad;
 
 #if defined(ARDUINO_ARCH_AVR)
 bool interruptsAreEnabled() { return bitRead(SREG, SREG_I); }
@@ -35,10 +35,10 @@ class InterruptGuard {
 };
 } // namespace
 
-DifferentialDrive::DifferentialDrive(Stepper &left,
-                                     Stepper &right,
-                                     Kalman  *filter,
-                                     BNO     *imu)
+DifferentialDrive::DifferentialDrive(Stepper  &left,
+                                     Stepper  &right,
+                                     Odometry *filter,
+                                     BNO      *imu)
   : _left(left),
     _right(right),
     _filter(filter),
@@ -49,23 +49,33 @@ DifferentialDrive::DifferentialDrive(Stepper &left,
     _isExecuting(false),
     _startLeftSteps(0),
     _startRightSteps(0),
-    _targetHeading(0.0),
-    _headingGain(2.0), // Default gain
-    _turnGain(1.5),    // Default gain
+    _targetHeading(0.0f),
     _subState(SubState::Init) {
+  // Default PID gains - tune these for your robot
+  _linearPID.setGains(2.0f, 0.1f, 0.05f);   // Distance PID
+  _linearPID.setOutputLimits(-100.0f, 100.0f);  // cm/s
+  _linearPID.setIntegratorLimits(-50.0f, 50.0f);
+  
+  _angularPID.setGains(3.0f, 0.2f, 0.1f);   // Heading PID
+  _angularPID.setOutputLimits(-180.0f, 180.0f);  // deg/s
+  _angularPID.setIntegratorLimits(-90.0f, 90.0f);
+  
   if (_filter) { _filter->reset(); }
 }
 
-void DifferentialDrive::setFilter(Kalman *filter) {
+void DifferentialDrive::setFilter(Odometry *filter) {
   _filter = filter;
   if (_filter) { _filter->reset(getPose()); }
 }
 
 void DifferentialDrive::setIMU(BNO *imu) { _imu = imu; }
 
-void DifferentialDrive::setGains(double headingGain, double distanceGain) {
-  _headingGain = headingGain;
-  (void)distanceGain; // Unused for now
+void DifferentialDrive::setLinearPID(float kP, float kI, float kD) {
+  _linearPID.setGains(kP, kI, kD);
+}
+
+void DifferentialDrive::setAngularPID(float kP, float kI, float kD) {
+  _angularPID.setGains(kP, kI, kD);
 }
 
 void DifferentialDrive::resetPose(const Pose &pose) {
@@ -88,18 +98,20 @@ bool DifferentialDrive::isBusy() const {
 }
 
 Pose DifferentialDrive::getPose() const {
-  if (_filter) { return _filter->getPoseEstimate(); }
+  if (_filter) { return _filter->getPose(); }
   return Pose(); // Return zero pose if no filter
 }
 
-double DifferentialDrive::getHeading() const {
-  if (_filter) { return _filter->getYaw(); }
+float DifferentialDrive::getHeading() const {
+  if (_filter) { return _filter->getTheta(); }
   if (_imu) { return _imu->getRotation()->getYawRads(); }
-  return 0.0;
+  return 0.0f;
 }
 
 void DifferentialDrive::update() {
-  // 1. Update Filter/Pose
+  // =========================================================================
+  // 1. COMPUTE ODOMETRY FROM WHEEL ENCODERS (stepper positions)
+  // =========================================================================
   long leftSteps  = _left.currentPosition();
   long rightSteps = _right.currentPosition();
 
@@ -108,20 +120,58 @@ void DifferentialDrive::update() {
   static unsigned long prevMicros = 0;
   
   unsigned long now = micros();
-  double dt = (now - prevMicros) * 1e-6;
+  float dt = (float)(now - prevMicros) * 1e-6f;
   prevMicros = now;
   
-  if (_filter) {
-      _filter->predict(leftSteps - prevLeft, rightSteps - prevRight, dt);
-      if (_imu && _imu->isReady()) {
-          Rotation* rot = _imu->getRotation();
-          if (rot) _filter->updateWithIMUYaw(rot->getYawRads());
-      }
-  }
-  prevLeft = leftSteps;
+  // Compute delta steps since last update
+  long deltaLeft  = leftSteps - prevLeft;
+  long deltaRight = rightSteps - prevRight;
+  prevLeft  = leftSteps;
   prevRight = rightSteps;
+  
+  if (_filter && dt > 1e-6f) {
+    // =========================================================================
+    // DIFFERENTIAL DRIVE KINEMATICS
+    // =========================================================================
+    // Convert step deltas to distances (cm)
+    float dlCm = cnv_stepsToCM(deltaLeft);
+    float drCm = cnv_stepsToCM(deltaRight);
+    
+    // Compute linear velocity (v) and angular velocity (omega)
+    // v = (v_left + v_right) / 2 = (dl + dr) / (2 * dt)
+    // omega = (v_right - v_left) / track_width = (dr - dl) / (W * dt)
+    float dCenterCm = (dlCm + drCm) * 0.5f;
+    float dThetaRad = (drCm - dlCm) / DT_TRACK_WIDTH_CM;
+    
+    // Convert to velocities
+    float v     = dCenterCm / dt;  // cm/s
+    float omega = dThetaRad / dt;  // rad/s
+    
+    // =========================================================================
+    // EKF PREDICTION STEP (with slip detection if IMU available)
+    // =========================================================================
+    if (_imu && _imu->isReady()) {
+      // Get IMU gyro Z (yaw rate) for slip detection
+      GyroData gyro = _imu->getGyroData();
+      float imuOmega = gyro.z;  // rad/s (gyro Z axis = yaw rate)
+      
+      // Use slip-aware prediction that compares wheel vs IMU omega
+      _filter->predictWithSlipDetection(v, omega, imuOmega, dt);
+      
+      // EKF CORRECTION STEP (with IMU yaw)
+      Rotation* rot = _imu->getRotation();
+      if (rot) {
+        _filter->correct(rot->getYawRads());
+      }
+    } else {
+      // No IMU available - use standard prediction (no slip detection)
+      _filter->predict(v, omega, dt);
+    }
+  }
 
-  // 2. Process Command
+  // =========================================================================
+  // 2. PROCESS COMMAND QUEUE
+  // =========================================================================
   if (!_isExecuting) {
     if (_queueCount > 0) {
       // Dequeue
@@ -137,12 +187,10 @@ void DifferentialDrive::update() {
       _startRightSteps = _right.currentPosition();
       _subState = SubState::Init;
       
-      if (_activeCommand.type == DrivetrainCommandType::DriveStraight) {
-          _targetHeading = getHeading(); // Maintain current heading
-      } else if (_activeCommand.type == DrivetrainCommandType::TurnDegrees) {
-          _targetHeading = normalizeAngle(getHeading() + degToRad(_activeCommand.data.turn.degrees));
+      if (_activeCommand.type == DrivetrainCommandType::TurnDegrees) {
+          _targetHeading = normalizeAngle(getHeading() + degToRad(_activeCommand.turn.degrees));
       } else if (_activeCommand.type == DrivetrainCommandType::FollowTrajectory) {
-          _activeCommand.data.trajectory.currentIndex = 0;
+          _activeCommand.trajectory.currentIndex = 0;
       }
     } else {
       setWheelVelocities(0, 0); // Idle
@@ -155,9 +203,6 @@ void DifferentialDrive::update() {
 
 void DifferentialDrive::processCommand() {
   switch (_activeCommand.type) {
-    case DrivetrainCommandType::DriveStraight:
-      handleDriveStraight();
-      break;
     case DrivetrainCommandType::TurnDegrees:
       handleTurnDegrees();
       break;
@@ -174,94 +219,80 @@ void DifferentialDrive::processCommand() {
   }
 }
 
-void DifferentialDrive::handleDriveStraight() {
-  double dist = getDistanceTraveled(_startLeftSteps, _startRightSteps, _left.currentPosition(), _right.currentPosition());
-  double targetDist = std::abs(_activeCommand.data.straight.distCm);
-  double error = targetDist - dist;
-
-  if (error <= kPoseDistanceTolCm) {
-    setWheelVelocities(0, 0);
-    _isExecuting = false;
-    return;
-  }
-
-  // Heading correction
-  double currentHeading = getHeading();
-  double headingError = normalizeAngle(_targetHeading - currentHeading);
-  double correction = headingError * _headingGain; // Simple P-controller
-
-  // Limit correction to avoid overpowering linear speed
-  // correction is in cm/s effectively if we apply it to velocity
-  
-  double baseSpeed = _activeCommand.data.straight.speedCmPerSec;
-  if (_activeCommand.data.straight.distCm < 0) baseSpeed = -baseSpeed;
-
-  // Slow down near end
-  if (error < 10.0) {
-      baseSpeed *= (error / 10.0);
-      if (std::abs(baseSpeed) < 2.0) baseSpeed = (baseSpeed > 0 ? 2.0 : -2.0);
-  }
-
-  double leftSpeed = baseSpeed - correction;
-  double rightSpeed = baseSpeed + correction;
-
-  setWheelVelocities(leftSpeed, rightSpeed);
-}
-
 void DifferentialDrive::handleTurnDegrees() {
-  double currentHeading = getHeading();
-  double error = normalizeAngle(_targetHeading - currentHeading);
+  float currentHeading = getHeading();
+  float error = normalizeAngle(_targetHeading - currentHeading);
 
-  if (std::abs(error) <= kPoseHeadingTolRad) {
+  if (fabsf(error) <= kPoseHeadingTolRad) {
     setWheelVelocities(0, 0);
+    _angularPID.reset();
     _isExecuting = false;
     return;
   }
 
-  double turnSpeed = error * _turnGain * kRadToDeg; // Convert to deg/s for scaling
+  // Use angular PID for turn control
+  // dt is approximate since we don't track it per-command; use a nominal value
+  float dt = 0.012f;  // ~12ms update rate
+  float turnSpeedDegSec = _angularPID.compute(error * kRadToDeg, dt);
   
-  // Clamp speed
-  double maxSpeed = std::abs(_activeCommand.data.turn.speedDegPerSec);
-  if (turnSpeed > maxSpeed) turnSpeed = maxSpeed;
-  if (turnSpeed < -maxSpeed) turnSpeed = -maxSpeed;
+  // Clamp to commanded max speed
+  float maxSpeed = fabsf(_activeCommand.turn.speedDegPerSec);
+  if (turnSpeedDegSec > maxSpeed) turnSpeedDegSec = maxSpeed;
+  if (turnSpeedDegSec < -maxSpeed) turnSpeedDegSec = -maxSpeed;
   
   // Minimum speed to overcome friction
-  if (std::abs(turnSpeed) < 10.0) turnSpeed = (turnSpeed > 0 ? 10.0 : -10.0);
+  if (fabsf(turnSpeedDegSec) < 10.0f && fabsf(error) > kPoseHeadingTolRad) {
+    turnSpeedDegSec = (turnSpeedDegSec > 0 ? 10.0f : -10.0f);
+  }
 
   // Convert deg/s to cm/s for wheels
-  double wheelSpeed = degToRad(turnSpeed) * (DT_TRACK_WIDTH_CM / 2.0);
+  float wheelSpeed = degToRad(turnSpeedDegSec) * (DT_TRACK_WIDTH_CM / 2.0f);
 
   setWheelVelocities(-wheelSpeed, wheelSpeed);
 }
 
 void DifferentialDrive::handleMoveToPose() {
     Pose currentPose = getPose();
-    Pose targetPose = _activeCommand.data.pose.target;
+    // Reconstruct target pose from stored floats
+    Rotation targetRot;
+    targetRot.setYawRads(_activeCommand.pose.targetYaw);
+    Pose targetPose(_activeCommand.pose.targetX, _activeCommand.pose.targetY, targetRot);
     
-    double dx = targetPose.x - currentPose.x;
-    double dy = targetPose.y - currentPose.y;
-    double dist = std::sqrt(dx*dx + dy*dy);
-    double targetHeading = std::atan2(dy, dx);
+    float dx = targetPose.x - currentPose.x;
+    float dy = targetPose.y - currentPose.y;
+    float dist = sqrtf(dx*dx + dy*dy);
+    float targetHeading = atan2f(dy, dx);
     
+    // Nominal dt for PID (update rate ~12ms)
+    // PID controller uses seconds
+    static float prevTime = 0.0f;
+    float now = millis() * 1e-3f;
+    float dt = now - prevTime;
+    prevTime = now;
+
     switch (_subState) {
         case SubState::Init:
+            _linearPID.reset();
+            _angularPID.reset();
             _subState = SubState::AlignToTarget;
             break;
             
         case SubState::AlignToTarget: {
-            double headingError = normalizeAngle(targetHeading - currentPose.rot.getYawRads());
-            if (std::abs(headingError) < kPoseHeadingTolRad) {
+            float headingError = normalizeAngle(targetHeading - currentPose.rot.getYawRads());
+            if (fabsf(headingError) < kPoseHeadingTolRad) {
                 _subState = SubState::DriveToTarget;
+                _linearPID.reset();
+                _angularPID.reset();
                 _startLeftSteps = _left.currentPosition();
                 _startRightSteps = _right.currentPosition();
             } else {
-                // Turn logic
-                double turnSpeed = headingError * _turnGain * kRadToDeg;
-                double maxSpeed = _activeCommand.data.pose.turnSpeed;
-                if (turnSpeed > maxSpeed) turnSpeed = maxSpeed;
-                if (turnSpeed < -maxSpeed) turnSpeed = -maxSpeed;
-                if (std::abs(turnSpeed) < 10.0) turnSpeed = (turnSpeed > 0 ? 10.0 : -10.0);
-                double wheelSpeed = degToRad(turnSpeed) * (DT_TRACK_WIDTH_CM / 2.0);
+                // Use angular PID for turning
+                float turnSpeedDegSec = _angularPID.compute(headingError * kRadToDeg, dt);
+                float maxSpeed = _activeCommand.pose.turnSpeed;
+                if (turnSpeedDegSec > maxSpeed) turnSpeedDegSec = maxSpeed;
+                if (turnSpeedDegSec < -maxSpeed) turnSpeedDegSec = -maxSpeed;
+                if (fabsf(turnSpeedDegSec) < 10.0f) turnSpeedDegSec = (turnSpeedDegSec > 0 ? 10.0f : -10.0f);
+                float wheelSpeed = degToRad(turnSpeedDegSec) * (DT_TRACK_WIDTH_CM / 2.0f);
                 setWheelVelocities(-wheelSpeed, wheelSpeed);
             }
             break;
@@ -270,45 +301,50 @@ void DifferentialDrive::handleMoveToPose() {
         case SubState::DriveToTarget: {
             if (dist < kPoseDistanceTolCm) {
                 _subState = SubState::FinalAlign;
+                _angularPID.reset();
             } else {
-                // Drive logic with heading correction to target
-                // Re-calculate target heading dynamically to drive straight to point
-                double dynamicTargetHeading = std::atan2(dy, dx);
-                double headingError = normalizeAngle(dynamicTargetHeading - currentPose.rot.getYawRads());
+                // Re-calculate target heading dynamically to drive toward point
+                float dynamicTargetHeading = atan2f(dy, dx);
+                float headingError = normalizeAngle(dynamicTargetHeading - currentPose.rot.getYawRads());
                 
                 // If we deviate too much, stop and realign
-                if (std::abs(headingError) > degToRad(30)) {
+                if (fabsf(headingError) > degToRad(30.0f)) {
                     _subState = SubState::AlignToTarget;
+                    _angularPID.reset();
                     return;
                 }
                 
-                double correction = headingError * _headingGain;
-                double baseSpeed = _activeCommand.data.pose.linearSpeed;
+                // Use linear PID for distance control
+                float linearSpeed = _linearPID.compute(dist, dt);
                 
-                // Slow down
-                if (dist < 10.0) baseSpeed *= (dist / 10.0);
-                if (baseSpeed < 5.0) baseSpeed = 5.0;
+                // Clamp to commanded max speed
+                float maxLinear = _activeCommand.pose.linearSpeed;
+                if (linearSpeed > maxLinear) linearSpeed = maxLinear;
+                if (linearSpeed < 5.0f) linearSpeed = 5.0f;  // Minimum speed
                 
-                setWheelVelocities(baseSpeed - correction, baseSpeed + correction);
+                // Use angular PID for heading correction while driving
+                float correction = _angularPID.compute(headingError * kRadToDeg, dt) * 0.1f;  // Scale down for correction
+                
+                setWheelVelocities(linearSpeed - correction, linearSpeed + correction);
             }
             break;
         }
             
         case SubState::FinalAlign: {
-            double finalHeading = targetPose.rot.getYawRads();
-            double headingError = normalizeAngle(finalHeading - currentPose.rot.getYawRads());
-             if (std::abs(headingError) < kPoseHeadingTolRad) {
+            float finalHeading = _activeCommand.pose.targetYaw;
+            float headingError = normalizeAngle(finalHeading - currentPose.rot.getYawRads());
+            if (fabsf(headingError) < kPoseHeadingTolRad) {
                 _subState = SubState::Done;
                 setWheelVelocities(0, 0);
                 _isExecuting = false;
             } else {
-                // Turn logic
-                double turnSpeed = headingError * _turnGain * kRadToDeg;
-                double maxSpeed = _activeCommand.data.pose.turnSpeed;
-                if (turnSpeed > maxSpeed) turnSpeed = maxSpeed;
-                if (turnSpeed < -maxSpeed) turnSpeed = -maxSpeed;
-                if (std::abs(turnSpeed) < 10.0) turnSpeed = (turnSpeed > 0 ? 10.0 : -10.0);
-                double wheelSpeed = degToRad(turnSpeed) * (DT_TRACK_WIDTH_CM / 2.0);
+                // Use angular PID for final alignment
+                float turnSpeedDegSec = _angularPID.compute(headingError * kRadToDeg, dt);
+                float maxSpeed = _activeCommand.pose.turnSpeed;
+                if (turnSpeedDegSec > maxSpeed) turnSpeedDegSec = maxSpeed;
+                if (turnSpeedDegSec < -maxSpeed) turnSpeedDegSec = -maxSpeed;
+                if (fabsf(turnSpeedDegSec) < 10.0f) turnSpeedDegSec = (turnSpeedDegSec > 0 ? 10.0f : -10.0f);
+                float wheelSpeed = degToRad(turnSpeedDegSec) * (DT_TRACK_WIDTH_CM / 2.0f);
                 setWheelVelocities(-wheelSpeed, wheelSpeed);
             }
             break;
@@ -321,7 +357,7 @@ void DifferentialDrive::handleMoveToPose() {
 }
 
 void DifferentialDrive::handleFollowTrajectory() {
-    auto& trajData = _activeCommand.data.trajectory;
+    auto& trajData = _activeCommand.trajectory;
     
     if (trajData.currentIndex >= trajData.count) {
         _isExecuting = false;
@@ -329,95 +365,62 @@ void DifferentialDrive::handleFollowTrajectory() {
         return;
     }
     
-    // Create a temporary MoveToPose command for the current point
-    // We can reuse the handleMoveToPose logic by setting up a fake command or refactoring.
-    // To avoid code duplication, let's just run the logic inline or use a helper.
-    // For simplicity, let's treat the current point as a target and use a state machine similar to MoveToPose.
-    // But we need to persist state between updates.
-    // We can use _subState for the current point.
-    
-    // Check if we just started this point
-    // We need a way to know if we are initializing a new point.
-    // Let's assume _subState is reset to Init when we increment index.
-    
     Pose targetPose = trajData.points[trajData.currentIndex];
-    
-    // We can temporarily swap _activeCommand to MoveToPose to use handleMoveToPose?
-    // No, that's messy. Let's just copy the logic or call a helper.
-    // Actually, we can just use the same logic variables.
-    
-    // Let's implement a simplified version: Go to point, then next.
-    // Note: Trajectory following usually implies continuous motion, not stop-and-turn at each point.
-    // But "list of poses" suggests visiting them.
-    // If we want continuous, we'd use Pure Pursuit or similar.
-    // Given "revamp", let's stick to point-to-point for now unless requested otherwise.
-    // The user said "follow a trajectory, which is just a list of poses".
-    
     Pose currentPose = getPose();
-    double dx = targetPose.x - currentPose.x;
-    double dy = targetPose.y - currentPose.y;
-    double dist = std::sqrt(dx*dx + dy*dy);
+    float dx = targetPose.x - currentPose.x;
+    float dy = targetPose.y - currentPose.y;
+    float dist = sqrtf(dx*dx + dy*dy);
     
-    // Logic:
-    // 1. Turn to face point
-    // 2. Drive to point
-    // 3. If close enough, increment index
+    // Nominal dt for PID
+    float dt = 0.012f;
     
-    double targetHeading = std::atan2(dy, dx);
-    double headingError = normalizeAngle(targetHeading - currentPose.rot.getYawRads());
+    float targetHeading = atan2f(dy, dx);
+    float headingError = normalizeAngle(targetHeading - currentPose.rot.getYawRads());
     
     if (dist < kPoseDistanceTolCm) {
-        // Reached point
+        // Reached point, move to next
         trajData.currentIndex++;
-        // Don't stop, just proceed to next point immediately
+        _linearPID.reset();
+        _angularPID.reset();
         return;
     }
     
-    // If heading error is large, turn in place (or slow down turn)
-    if (std::abs(headingError) > degToRad(20)) {
-        // Turn in place
-        double turnSpeed = headingError * _turnGain * kRadToDeg;
-        double maxSpeed = trajData.turnSpeed;
-        if (turnSpeed > maxSpeed) turnSpeed = maxSpeed;
-        if (turnSpeed < -maxSpeed) turnSpeed = -maxSpeed;
-        double wheelSpeed = degToRad(turnSpeed) * (DT_TRACK_WIDTH_CM / 2.0);
+    // If heading error is large, turn in place
+    if (fabsf(headingError) > degToRad(20.0f)) {
+        // Use angular PID for turning
+        float turnSpeedDegSec = _angularPID.compute(headingError * kRadToDeg, dt);
+        float maxSpeed = trajData.turnSpeed;
+        if (turnSpeedDegSec > maxSpeed) turnSpeedDegSec = maxSpeed;
+        if (turnSpeedDegSec < -maxSpeed) turnSpeedDegSec = -maxSpeed;
+        float wheelSpeed = degToRad(turnSpeedDegSec) * (DT_TRACK_WIDTH_CM / 2.0f);
         setWheelVelocities(-wheelSpeed, wheelSpeed);
     } else {
-        // Drive and correct
-        double correction = headingError * _headingGain;
-        double baseSpeed = trajData.linearSpeed;
+        // Drive and correct using PID
+        // Linear PID on distance
+        float linearSpeed = _linearPID.compute(dist, dt);
+        float maxLinear = trajData.linearSpeed;
+        if (linearSpeed > maxLinear) linearSpeed = maxLinear;
+        if (linearSpeed < 5.0f) linearSpeed = 5.0f;
+        
+        // Angular PID for heading correction (scaled down for while-driving correction)
+        float correction = _angularPID.compute(headingError * kRadToDeg, dt) * 0.1f;
         
         // Slow down if turning sharp
-        baseSpeed *= std::cos(headingError);
+        linearSpeed *= cosf(headingError);
         
-        setWheelVelocities(baseSpeed - correction, baseSpeed + correction);
+        setWheelVelocities(linearSpeed - correction, linearSpeed + correction);
     }
 }
 
 // Queueing functions
-bool DifferentialDrive::queueDriveStraight(double distanceCm, double speedCmPerSec) {
-  InterruptGuard guard;
-  if (_queueCount >= kDrivetrainQueueSize) return false;
-  
-  DrivetrainCommand cmd;
-  cmd.type = DrivetrainCommandType::DriveStraight;
-  cmd.data.straight.distCm = distanceCm;
-  cmd.data.straight.speedCmPerSec = speedCmPerSec;
-  
-  _queue[_queueTail] = cmd;
-  _queueTail = (_queueTail + 1) % kDrivetrainQueueSize;
-  _queueCount++;
-  return true;
-}
-
-bool DifferentialDrive::queueTurnDegrees(double degrees, double speedDegPerSec) {
+bool DifferentialDrive::queueTurnDegrees(float degrees, float speedDegPerSec) {
   InterruptGuard guard;
   if (_queueCount >= kDrivetrainQueueSize) return false;
   
   DrivetrainCommand cmd;
   cmd.type = DrivetrainCommandType::TurnDegrees;
-  cmd.data.turn.degrees = degrees;
-  cmd.data.turn.speedDegPerSec = speedDegPerSec;
+  cmd.turn.degrees = degrees;
+  cmd.turn.speedDegPerSec = speedDegPerSec;
   
   _queue[_queueTail] = cmd;
   _queueTail = (_queueTail + 1) % kDrivetrainQueueSize;
@@ -425,15 +428,17 @@ bool DifferentialDrive::queueTurnDegrees(double degrees, double speedDegPerSec) 
   return true;
 }
 
-bool DifferentialDrive::queueMoveToPose(const Pose &target, double linearSpeed, double turnSpeed) {
+bool DifferentialDrive::queueMoveToPose(const Pose &target, float linearSpeed, float turnSpeed) {
   InterruptGuard guard;
   if (_queueCount >= kDrivetrainQueueSize) return false;
   
   DrivetrainCommand cmd;
   cmd.type = DrivetrainCommandType::MoveToPose;
-  cmd.data.pose.target = target;
-  cmd.data.pose.linearSpeed = linearSpeed;
-  cmd.data.pose.turnSpeed = turnSpeed;
+  cmd.pose.targetX = target.x;
+  cmd.pose.targetY = target.y;
+  cmd.pose.targetYaw = target.rot.getYawRads();
+  cmd.pose.linearSpeed = linearSpeed;
+  cmd.pose.turnSpeed = turnSpeed;
   
   _queue[_queueTail] = cmd;
   _queueTail = (_queueTail + 1) % kDrivetrainQueueSize;
@@ -441,17 +446,17 @@ bool DifferentialDrive::queueMoveToPose(const Pose &target, double linearSpeed, 
   return true;
 }
 
-bool DifferentialDrive::queueFollowTrajectory(const Trajectory &traj, double linearSpeed, double turnSpeed) {
+bool DifferentialDrive::queueFollowTrajectory(const Trajectory &traj, float linearSpeed, float turnSpeed) {
   InterruptGuard guard;
   if (_queueCount >= kDrivetrainQueueSize) return false;
   
   DrivetrainCommand cmd;
   cmd.type = DrivetrainCommandType::FollowTrajectory;
-  cmd.data.trajectory.points = traj.points;
-  cmd.data.trajectory.count = traj.count;
-  cmd.data.trajectory.linearSpeed = linearSpeed;
-  cmd.data.trajectory.turnSpeed = turnSpeed;
-  cmd.data.trajectory.currentIndex = 0;
+  cmd.trajectory.points = traj.points;
+  cmd.trajectory.count = traj.count;
+  cmd.trajectory.linearSpeed = linearSpeed;
+  cmd.trajectory.turnSpeed = turnSpeed;
+  cmd.trajectory.currentIndex = 0;
   
   _queue[_queueTail] = cmd;
   _queueTail = (_queueTail + 1) % kDrivetrainQueueSize;
@@ -460,24 +465,18 @@ bool DifferentialDrive::queueFollowTrajectory(const Trajectory &traj, double lin
 }
 
 // Helpers
-void DifferentialDrive::setWheelVelocities(double leftCmPerSec, double rightCmPerSec) {
+void DifferentialDrive::setWheelVelocities(float leftCmPerSec, float rightCmPerSec) {
   float leftSteps = leftCmPerSec * StepsPerCM;
   float rightSteps = rightCmPerSec * StepsPerCM;
   _left.commandVelocity(leftSteps);
   _right.commandVelocity(rightSteps);
 }
 
-double DifferentialDrive::getDistanceTraveled(long startLeft, long startRight, long currentLeft, long currentRight) {
-    double dl = cnv_stepsToCM(currentLeft - startLeft);
-    double dr = cnv_stepsToCM(currentRight - startRight);
-    return (dl + dr) / 2.0;
-}
-
-double DifferentialDrive::normalizeAngle(double angle) {
-  while (angle > PI) angle -= TWO_PI;
-  while (angle < -PI) angle += TWO_PI;
+float DifferentialDrive::normalizeAngle(float angle) {
+  while (angle > PI_F) angle -= TWO_PI_F;
+  while (angle < -PI_F) angle += TWO_PI_F;
   return angle;
 }
 
-double DifferentialDrive::degToRad(double deg) { return deg * kDegToRad; }
-double DifferentialDrive::radToDeg(double rad) { return rad * kRadToDeg; }
+float DifferentialDrive::degToRad(float deg) { return deg * kDegToRad; }
+float DifferentialDrive::radToDeg(float rad) { return rad * kRadToDeg; }
