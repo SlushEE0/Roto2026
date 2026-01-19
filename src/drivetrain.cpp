@@ -125,9 +125,6 @@ float DifferentialDrive::getHeading() const {
 }
 
 void DifferentialDrive::update() {
-  // =========================================================================
-  // 1. COMPUTE ODOMETRY FROM WHEEL ENCODERS (stepper positions)
-  // =========================================================================
   long leftSteps = _left.currentPosition();
   long rightSteps = _right.currentPosition();
 
@@ -146,16 +143,9 @@ void DifferentialDrive::update() {
   prevRight = rightSteps;
 
   if (_filter && dt > 1e-6f) {
-    // =========================================================================
-    // DIFFERENTIAL DRIVE KINEMATICS
-    // =========================================================================
-    // Convert step deltas to distances (cm)
     float dlCm = cnv_stepsToCM(deltaLeft);
     float drCm = cnv_stepsToCM(deltaRight);
 
-    // Compute linear velocity (v) and angular velocity (omega)
-    // v = (v_left + v_right) / 2 = (dl + dr) / (2 * dt)
-    // omega = (v_right - v_left) / track_width = (dr - dl) / (W * dt)
     float dCenterCm = (dlCm + drCm) * 0.5f;
     float dThetaRad = (drCm - dlCm) / DT_TRACK_WIDTH_CM;
 
@@ -163,31 +153,22 @@ void DifferentialDrive::update() {
     float v = dCenterCm / dt;     // cm/s
     float omega = dThetaRad / dt; // rad/s
 
-    // =========================================================================
-    // EKF PREDICTION STEP (with slip detection if IMU available)
-    // =========================================================================
     if (_imu && _imu->isReady()) {
       // Get IMU gyro Z (yaw rate) for slip detection
       GyroData gyro = _imu->getGyroData();
       float imuOmega = gyro.z; // rad/s (gyro Z axis = yaw rate)
 
-      // Use slip-aware prediction that compares wheel vs IMU omega
       _filter->predictWithSlipDetection(v, omega, imuOmega, dt);
 
-      // EKF CORRECTION STEP (with IMU yaw)
       Rotation* rot = _imu->getRotation();
       if (rot) {
         _filter->correct(rot->getYawRads());
       }
     } else {
-      // No IMU available - use standard prediction (no slip detection)
       _filter->predict(v, omega, dt);
     }
   }
 
-  // =========================================================================
-  // 2. PROCESS COMMAND QUEUE
-  // =========================================================================
   if (!_isExecuting) {
     if (_queueCount > 0) {
       // Dequeue
@@ -248,8 +229,6 @@ void DifferentialDrive::handleTurnDegrees() {
     return;
   }
 
-  // Use angular PID for turn control
-  // dt is approximate since we don't track it per-command; use a nominal value
   float dt = 0.012f; // ~12ms update rate
   float turnSpeedDegSec = _angularPID.compute(error * kRadToDeg, dt);
 

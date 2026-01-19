@@ -33,15 +33,6 @@ struct DeadReckoningCommand {
   }
 };
 
-/**
- * @brief Simple dead-reckoning drivetrain controller.
- *
- * This class provides basic drivetrain control without advanced odometry.
- * - DriveStraight: Uses wheel encoders for distance, IMU for heading correction
- * - Turn: Uses IMU only for rotation angle
- *
- * No EKF, no slip detection, no position tracking - just simple control.
- */
 class DeadReckoningDrivetrain {
 public:
   DeadReckoningDrivetrain(Stepper& left, Stepper& right, BNO* imu = nullptr);
@@ -94,10 +85,9 @@ private:
   // Control state
   long _startLeftSteps;
   long _startRightSteps;
-  float _startHeading;  // Heading at command start (radians)
-  float _targetHeading; // Target heading for turns (radians)
+  float _startHeading; 
+  float _targetHeading;
 
-  // Gains
-  float _headingGain; // For straight driving correction
-  float _turnGain;    // For turn control
+  float _headingGain;
+  float _turnGain;  
 };

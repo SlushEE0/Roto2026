@@ -4,6 +4,16 @@
 
 #include <config.h>
 
+// POST-USC
+/*
+* this is probably the issue
+* - HELLA vibrations at ANY speed, could be torque, microstepping, etc.
+* - maybe switch back to bresnham?
+* - obtain an oscilloscope?
+* - lowk nuke the codebase neel
+*/
+
+
 namespace {
 constexpr uint32_t kStepPulseWidthUs = 3;
 constexpr float    kSpeedEpsilon     = 1e-3f;

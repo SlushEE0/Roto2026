@@ -21,6 +21,8 @@ Stepper
 
 Odometry odometry;
 // DifferentialDrive drivetrain(stepper_l, stepper_r, &odometry, &imu);
+
+// switch to dead reckoning drivetrain bc diffydrive does not work
 DeadReckoningDrivetrain drivetrain(stepper_l, stepper_r, &imu);
 
 void fastLoop() {

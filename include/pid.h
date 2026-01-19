@@ -2,11 +2,6 @@
 
 #include <cmath>
 
-/**
- * @brief Simple PID controller with anti-windup and output clamping
- * 
- * Uses float precision for STM32F103 (no FPU).
- */
 class PIDController {
 public:
     struct Gains {
@@ -52,13 +47,6 @@ public:
         _firstUpdate = true;
     }
 
-    /**
-     * @brief Compute PID output
-     * 
-     * @param error Current error (setpoint - measurement)
-     * @param dt Time step in seconds
-     * @return Clamped PID output
-     */
     float compute(float error, float dt) {
         if (dt <= 0.0f) return 0.0f;
 

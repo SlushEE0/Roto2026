@@ -4,7 +4,6 @@
 #include <config.h>
 #include <math.h>
 
-// Use float for STM32F103 (no hardware FPU - double is emulated and slow)
 #define G_MS2 9.80665f
 
 // Float constants
