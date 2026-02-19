@@ -77,11 +77,12 @@ class Stepper {
   volatile int32_t _currentPosition;
   volatile int32_t _targetPosition;
 
-  volatile float _commandVelocity; // signed steps/s
+  volatile float _commandVelocity; // signed steps/s (commanded target)
   float          _maxSpeed;
-  float          _acceleration;
+  float          _acceleration; // steps/s^2; 0 = no ramp (instant)
 
-  volatile uint32_t _stepIntervalUs;
+  volatile uint32_t _stepIntervalUs;       // target interval at commanded speed
+  volatile float    _currentSpeedStepsPerSec; // actual speed being executed (ramped)
   volatile bool     _running;
   volatile bool     _stepPinIsHigh;
   volatile int8_t   _directionSign;

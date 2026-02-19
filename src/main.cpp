@@ -42,6 +42,8 @@ void setup() {
   stepper_l.begin(1000000UL);
   stepper_r.setMaxSpeed(MOTOR_MAX_SPEED);
   stepper_l.setMaxSpeed(MOTOR_MAX_SPEED);
+  stepper_r.setAcceleration(MOTOR_MAX_ACCEL);
+  stepper_l.setAcceleration(MOTOR_MAX_ACCEL);
 
   for (int i = 0; i < 4; i++) {
     if (imu.connect(BNO_SDA_PIN, BNO_SCL_PIN, BNO_INT_PIN, BNO_RST_PIN)) {
@@ -90,38 +92,20 @@ void setup() {
 }
 
 void loop() {
-  // Pose pose = drivetrain.getPose();
-  // Serial1.print("Pose X:");
-  // Serial1.print(pose.x, 2);
-  // Serial1.print(", Y:");
-  // Serial1.print(pose.y, 2);
-  // Serial1.print(", Yaw:");
-  // Serial1.print(pose.rot.getYawDegs(), 2);
-  // Serial1.print(" deg | Busy:");
-  // Serial1.print(drivetrain.isBusy() ? "YES" : "NO");
+  static unsigned long lastPrint = 0;
+  unsigned long now = millis();
+  if (now - lastPrint >= 100) {
+    lastPrint = now;
 
-  // // Print drivetrain state
-  // Serial1.print(" | Exec:");
-  // Serial1.print(drivetrain.isExecuting() ? "YES" : "NO");
-  // Serial1.print(" | Cmd:");
-  // switch (drivetrain.getCurrentCommandType()) {
-  //   case DrivetrainCommandType::Idle:
-  //     Serial1.print("Idle");
-  //     break;
-  //   case DrivetrainCommandType::TurnDegrees:
-  //     Serial1.print("Turn");
-  //     break;
-  //   case DrivetrainCommandType::MoveToPose:
-  //     Serial1.print("MoveToPose");
-  //     break;
-  //   case DrivetrainCommandType::FollowTrajectory:
-  //     Serial1.print("FollowTraj");
-  //     break;
-  // }
-  // Serial1.print(" | SubState:");
-  // Serial1.print(drivetrain.getSubStateName());
-  // Serial1.print(" | Queue:");
-  // Serial1.println(drivetrain.getQueueCount());
-
-  // delay(30);
+    Serial1.print("Busy:");
+    Serial1.print(drivetrain.isBusy() ? "YES" : "NO ");
+    Serial1.print(" | Exec:");
+    Serial1.print(drivetrain.isExecuting() ? "YES" : "NO ");
+    Serial1.print(" | Queue:");
+    Serial1.print(drivetrain.getQueueCount());
+    Serial1.print(" | L_spd:");
+    Serial1.print(stepper_l.currentSpeed(), 0);
+    Serial1.print(" | R_spd:");
+    Serial1.println(stepper_r.currentSpeed(), 0);
+  }
 }

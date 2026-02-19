@@ -38,12 +38,13 @@ Stepper::Stepper(HardwareTimer *timer,
       static_cast<float>(MOTOR_MAX_SPEED > 0 ? MOTOR_MAX_SPEED : 20000)),
     _acceleration(0.0f),
     _stepIntervalUs(0),
+    _currentSpeedStepsPerSec(0.0f),
     _running(false),
     _stepPinIsHigh(false),
     _directionSign(1),
     _mode(static_cast<uint8_t>(Mode::Idle)) {}
 
-void Stepper::begin(uint32_t timerFreqHz) {
+void Stepper::begin(uint32_t /*timerFreqHz*/) {
   pinMode(_stepPin, OUTPUT);
   pinMode(_dirPin, OUTPUT);
   pinMode(_enablePin, OUTPUT);
@@ -51,19 +52,10 @@ void Stepper::begin(uint32_t timerFreqHz) {
   digitalWrite(_dirPin, LOW);
   digitalWrite(_enablePin, HIGH);
 
-  if (timerFreqHz == 0) timerFreqHz = 1000000UL;
-
-  uint32_t prescale = SystemCoreClock / timerFreqHz;
-  if (prescale == 0) prescale = 1;
-  uint32_t actualFreq = SystemCoreClock / prescale;
-  while (actualFreq > timerFreqHz && prescale < 0xFFFF) {
-    ++prescale;
-    actualFreq = SystemCoreClock / prescale;
-  }
-  if (prescale > 0) prescale -= 1;
-
-  _timer->setPrescaleFactor(prescale);
-  _timer->setOverflow(1000, MICROSEC_FORMAT);
+  // HardwareTimer::setOverflow(MICROSEC_FORMAT) manages the prescaler internally.
+  // We must NOT manually set prescaler before this call as it would conflict.
+  _timer->pause();
+  _timer->setOverflow(1000, MICROSEC_FORMAT); // placeholder; reprogrammed each step
   _timer->attachInterrupt([this]() { this->handleTimerInterrupt(); });
   _timer->pause();
 
@@ -76,11 +68,12 @@ void Stepper::disable() { stop(true); }
 
 void Stepper::stop(bool disableDriver) {
   noInterrupts();
-  _running         = false;
-  _mode            = static_cast<uint8_t>(Mode::Idle);
-  _commandVelocity = 0.0f;
-  _targetPosition  = _currentPosition;
-  _stepPinIsHigh   = false;
+  _running                  = false;
+  _mode                     = static_cast<uint8_t>(Mode::Idle);
+  _commandVelocity          = 0.0f;
+  _targetPosition           = _currentPosition;
+  _stepPinIsHigh            = false;
+  _currentSpeedStepsPerSec  = 0.0f;
   interrupts();
 
   _timer->pause();
@@ -134,7 +127,10 @@ void Stepper::commandPosition(int32_t targetPosition, float speedStepsPerSec) {
   _commandVelocity = speedStepsPerSec * static_cast<float>(direction);
   _stepIntervalUs  = interval;
   _running         = true;
-  if (start) { _stepPinIsHigh = false; }
+  if (start) {
+    _stepPinIsHigh           = false;
+    _currentSpeedStepsPerSec = 0.0f;
+  }
   applyDirection(direction);
   interrupts();
 
@@ -164,7 +160,10 @@ void Stepper::commandVelocity(float stepsPerSecond) {
   _commandVelocity = stepsPerSecond;
   _stepIntervalUs  = interval;
   _running         = true;
-  if (start) { _stepPinIsHigh = false; }
+  if (start) {
+    _stepPinIsHigh           = false;
+    _currentSpeedStepsPerSec = 0.0f;
+  }
   applyDirection(direction);
   interrupts();
 
@@ -195,11 +194,12 @@ void Stepper::primeTimer(uint32_t periodUs) {
 }
 
 void Stepper::hardStopFromISR() {
-  _running         = false;
-  _mode            = static_cast<uint8_t>(Mode::Idle);
-  _commandVelocity = 0.0f;
-  _targetPosition  = _currentPosition;
-  _stepPinIsHigh   = false;
+  _running                 = false;
+  _mode                    = static_cast<uint8_t>(Mode::Idle);
+  _commandVelocity         = 0.0f;
+  _targetPosition          = _currentPosition;
+  _stepPinIsHigh           = false;
+  _currentSpeedStepsPerSec = 0.0f;
   _timer->pause();
   digitalWrite(_stepPin, LOW);
 }
@@ -213,16 +213,19 @@ void Stepper::handleTimerInterrupt() {
   }
 
   if (!_stepPinIsHigh) {
+    // Rising edge: assert step pulse
     digitalWrite(_stepPin, HIGH);
     _stepPinIsHigh = true;
     primeTimer(kStepPulseWidthUs);
     return;
   }
 
+  // Falling edge: step pulse complete — count the step
   digitalWrite(_stepPin, LOW);
   _stepPinIsHigh = false;
   _currentPosition += _directionSign;
 
+  // --- Mode-specific position / direction checks ---
   if (_mode == static_cast<uint8_t>(Mode::Position)) {
     if (_currentPosition == _targetPosition) {
       hardStopFromISR();
@@ -231,6 +234,7 @@ void Stepper::handleTimerInterrupt() {
     int32_t remaining = _targetPosition - _currentPosition;
     int8_t  desired   = (remaining > 0) ? 1 : -1;
     if (desired != _directionSign) { applyDirection(desired); }
+
   } else if (_mode == static_cast<uint8_t>(Mode::Velocity)) {
     float commanded = _commandVelocity;
     if (fabsf(commanded) < kSpeedEpsilon) {
@@ -239,14 +243,60 @@ void Stepper::handleTimerInterrupt() {
     }
     int8_t desired = (commanded > 0.0f) ? 1 : -1;
     if (desired != _directionSign) { applyDirection(desired); }
+
   } else {
     hardStopFromISR();
     return;
   }
 
-  uint32_t interval = _stepIntervalUs;
-  uint32_t offTime  = (interval > kStepPulseWidthUs)
-                        ? (interval - kStepPulseWidthUs)
-                        : kMinOffTimeUs;
+  // --- Compute the commanded (target) speed magnitude ---
+  float cmdSpeed = fabsf(_commandVelocity);
+
+  // For position mode: apply deceleration look-ahead so we arrive at the
+  // target position with zero velocity instead of slamming into it.
+  if (_mode == static_cast<uint8_t>(Mode::Position) && _acceleration > 0.0f) {
+    int32_t remaining  = abs(_targetPosition - _currentPosition);
+    float   v          = _currentSpeedStepsPerSec;
+    // Distance (in steps) needed to brake from v to 0 at _acceleration.
+    float   decelSteps = (v * v) / (2.0f * _acceleration);
+    if (static_cast<float>(remaining) <= decelSteps) {
+      // Target speed that brings us to a stop exactly at the target.
+      float decelV = sqrtf(2.0f * _acceleration * static_cast<float>(remaining));
+      if (decelV < cmdSpeed) { cmdSpeed = decelV; }
+    }
+  }
+
+  // --- Acceleration ramp: smoothly move current speed toward cmdSpeed ---
+  float v = _currentSpeedStepsPerSec;
+  if (_acceleration > 0.0f) {
+    float dv;
+    if (v < 1.0f) {
+      // Starting from rest: first-step speed using Austin/Eiderman formula.
+      // This corresponds to the time needed to travel 1 step from rest.
+      dv = sqrtf(2.0f * _acceleration);
+    } else {
+      // Normal operation: dv = a * dt, where dt ≈ 1/v (seconds per step).
+      dv = _acceleration / v;
+    }
+    float diff = cmdSpeed - v;
+    v += (fabsf(diff) <= dv) ? diff : (diff > 0.0f ? dv : -dv);
+  } else {
+    // No ramp configured: instant speed change (legacy behaviour).
+    v = cmdSpeed;
+  }
+
+  // If the ramp has brought us to a full stop, finish.
+  if (v < kSpeedEpsilon) {
+    hardStopFromISR();
+    return;
+  }
+
+  _currentSpeedStepsPerSec = v;
+
+  // Schedule the off-time before the next rising edge.
+  uint32_t nextIntervalUs = static_cast<uint32_t>(1e6f / v);
+  uint32_t offTime        = (nextIntervalUs > kStepPulseWidthUs)
+                               ? (nextIntervalUs - kStepPulseWidthUs)
+                               : kMinOffTimeUs;
   primeTimer(offTime);
 }
