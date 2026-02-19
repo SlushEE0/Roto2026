@@ -2,301 +2,292 @@
 
 #include <math.h>
 
-#include <config.h>
-
-// POST-USC
-/*
-* this is probably the issue
-* - HELLA vibrations at ANY speed, could be torque, microstepping, etc.
-* - maybe switch back to bresnham?
-* - obtain an oscilloscope?
-* - lowk nuke the codebase neel
-*/
-
+// ---------------------------------------------------------------------------
+// Implementation notes
+// ---------------------------------------------------------------------------
+// The step generator runs as a state machine clocked by a fixed-rate ISR
+// (kStepTimerHz, typically 200 kHz).  Every tick(), two things can happen:
+//
+//   1. Falling-edge phase (pulseCnt > 0):
+//        Count down the pulse width.  When pulseCnt reaches 0, pull STEP
+//        LOW, advance the position counter, then compute the next ticks-per-
+//        step value via the velocity ramp (one float multiply and possibly
+//        one sqrtf – fast enough on Cortex-M3 at 72 MHz since it runs at
+//        most once per step, not once per tick).
+//
+//   2. Countdown phase (pulseCnt == 0):
+//        Decrement _counter.  When it reaches 0, assert STEP HIGH and arm
+//        the pulse-width countdown.
+//
+// The velocity ramp uses the Austin / Eiderman recurrence:
+//   • Starting from rest: first interval  c₀ = √(2 / a) × kStepTimerHz
+//   • Each subsequent step: Δv = a / v_current  (= a × Δt)
+//   • Position-mode deceleration: look ahead using  d = v² / (2a)  and cap
+//     the target speed so the motor arrives at the target with v ≈ 0.
+// ---------------------------------------------------------------------------
 
 namespace {
-constexpr uint32_t kStepPulseWidthUs = 3;
-constexpr float    kSpeedEpsilon     = 1e-3f;
-constexpr uint32_t kPrimeDelayUs     = 5;
-constexpr uint32_t kMinOffTimeUs     = 1;
-} // namespace
+  constexpr float kVelEpsilon = 1e-3f; // steps/s below which we consider stopped
+}
 
-Stepper::Stepper(HardwareTimer *timer,
-                 uint8_t        stepPin,
-                 uint8_t        dirPin,
-                 uint8_t        enablePin,
-                 bool           invertDir)
-  : _timer(timer),
-    _stepPin(stepPin),
+// ── Constructor ──────────────────────────────────────────────────────────────
+
+Stepper::Stepper(uint8_t stepPin,
+                 uint8_t dirPin,
+                 uint8_t enablePin,
+                 bool    invertDir)
+  : _stepPin(stepPin),
     _dirPin(dirPin),
     _enablePin(enablePin),
     _invertDir(invertDir),
-    _currentPosition(0),
-    _targetPosition(0),
-    _commandVelocity(0.0f),
-    _maxSpeed(
-      static_cast<float>(MOTOR_MAX_SPEED > 0 ? MOTOR_MAX_SPEED : 20000)),
-    _acceleration(0.0f),
-    _stepIntervalUs(0),
-    _currentSpeedStepsPerSec(0.0f),
-    _running(false),
-    _stepPinIsHigh(false),
-    _directionSign(1),
-    _mode(static_cast<uint8_t>(Mode::Idle)) {}
+    _maxSpeed(10000.0f),
+    _accel(0.0f),
+    _mode(Mode::Idle),
+    _position(0),
+    _target(0),
+    _tps(kTpsStop),
+    _targetTps(kTpsStop),
+    _speedSps(0.0f),
+    _accelISR(0.0f),
+    _counter(kTpsStop),
+    _pulseCnt(0),
+    _dir(1),
+    _cmdVelocity(0.0f) {}
 
-void Stepper::begin(uint32_t /*timerFreqHz*/) {
-  pinMode(_stepPin, OUTPUT);
-  pinMode(_dirPin, OUTPUT);
+// ── Setup ────────────────────────────────────────────────────────────────────
+
+void Stepper::begin() {
+  pinMode(_stepPin,   OUTPUT);
+  pinMode(_dirPin,    OUTPUT);
   pinMode(_enablePin, OUTPUT);
-  digitalWrite(_stepPin, LOW);
-  digitalWrite(_dirPin, LOW);
-  digitalWrite(_enablePin, HIGH);
-
-  // HardwareTimer::setOverflow(MICROSEC_FORMAT) manages the prescaler internally.
-  // We must NOT manually set prescaler before this call as it would conflict.
-  _timer->pause();
-  _timer->setOverflow(1000, MICROSEC_FORMAT); // placeholder; reprogrammed each step
-  _timer->attachInterrupt([this]() { this->handleTimerInterrupt(); });
-  _timer->pause();
-
-  stop(true);
+  digitalWrite(_stepPin,   LOW);
+  digitalWrite(_dirPin,    LOW);
+  digitalWrite(_enablePin, HIGH); // driver disabled at startup
 }
 
-void Stepper::enable() { digitalWrite(_enablePin, LOW); }
+// ── Configuration ─────────────────────────────────────────────────────────────
 
-void Stepper::disable() { stop(true); }
+void Stepper::setMaxSpeed(float stepsPerSec) {
+  if (stepsPerSec > 0.0f) _maxSpeed = stepsPerSec;
+}
 
-void Stepper::stop(bool disableDriver) {
+void Stepper::setAcceleration(float stepsPerSec2) {
+  _accel = (stepsPerSec2 > 0.0f) ? stepsPerSec2 : 0.0f;
   noInterrupts();
-  _running                  = false;
-  _mode                     = static_cast<uint8_t>(Mode::Idle);
-  _commandVelocity          = 0.0f;
-  _targetPosition           = _currentPosition;
-  _stepPinIsHigh            = false;
-  _currentSpeedStepsPerSec  = 0.0f;
+  _accelISR = _accel;
   interrupts();
-
-  _timer->pause();
-  digitalWrite(_stepPin, LOW);
-  if (disableDriver) { digitalWrite(_enablePin, HIGH); }
 }
 
-void Stepper::setMaxSpeed(float stepsPerSecond) {
-  if (stepsPerSecond > 0.0f) { _maxSpeed = stepsPerSecond; }
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+float Stepper::currentSpeed() const {
+  return _speedSps;
 }
 
-void Stepper::commandRelative(int32_t stepDelta, float speedStepsPerSec) {
-  int32_t current;
-  noInterrupts();
-  current = _currentPosition;
-  interrupts();
-  commandPosition(current + stepDelta, speedStepsPerSec);
+uint32_t Stepper::speedToTps(float stepsPerSec) const {
+  if (stepsPerSec < kVelEpsilon) return kTpsStop;
+  // Minimum ticks/step: pulse width + 1 off-tick.
+  float minTps = (float)(kPulseTicks + 1u);
+  float tps    = (float)kStepTimerHz / stepsPerSec;
+  if (tps < minTps) tps = minTps;
+  return (uint32_t)tps;
 }
 
-void Stepper::commandPosition(int32_t targetPosition, float speedStepsPerSec) {
-  if (speedStepsPerSec <= 0.0f) {
-    speedStepsPerSec = (_maxSpeed > 0.0f) ? _maxSpeed : fabsf(speedStepsPerSec);
-    if (speedStepsPerSec <= 0.0f) speedStepsPerSec = 1000.0f;
-  }
-  if (_maxSpeed > 0.0f && speedStepsPerSec > _maxSpeed) {
-    speedStepsPerSec = _maxSpeed;
-  }
-
-  enable();
-
-  uint32_t interval = intervalFromSpeed(speedStepsPerSec);
-
-  noInterrupts();
-  _targetPosition = targetPosition;
-  int32_t delta   = _targetPosition - _currentPosition;
-
-  if (delta == 0) {
-    _mode            = static_cast<uint8_t>(Mode::Idle);
-    _commandVelocity = 0.0f;
-    _running         = false;
-    interrupts();
-    _timer->pause();
-    digitalWrite(_stepPin, LOW);
-    return;
-  }
-
-  int8_t direction = (delta > 0) ? 1 : -1;
-  bool   start = !_running || (_mode != static_cast<uint8_t>(Mode::Position));
-
-  _mode            = static_cast<uint8_t>(Mode::Position);
-  _commandVelocity = speedStepsPerSec * static_cast<float>(direction);
-  _stepIntervalUs  = interval;
-  _running         = true;
-  if (start) {
-    _stepPinIsHigh           = false;
-    _currentSpeedStepsPerSec = 0.0f;
-  }
-  applyDirection(direction);
-  interrupts();
-
-  if (start) { primeTimer(kPrimeDelayUs); }
+void Stepper::doEnable() {
+  digitalWrite(_enablePin, LOW);
 }
 
-void Stepper::commandVelocity(float stepsPerSecond) {
-  if (_maxSpeed > 0.0f) {
-    if (stepsPerSecond > _maxSpeed) stepsPerSecond = _maxSpeed;
-    if (stepsPerSecond < -_maxSpeed) stepsPerSecond = -_maxSpeed;
-  }
+void Stepper::applyDir(int8_t dir) {
+  _dir = (dir >= 0) ? 1 : -1;
+  bool high = (_dir > 0);
+  digitalWrite(_dirPin, _invertDir ? !high : high);
+}
 
-  if (fabsf(stepsPerSecond) < kSpeedEpsilon) {
+// ── Motion commands ───────────────────────────────────────────────────────────
+
+void Stepper::commandVelocity(float stepsPerSec) {
+  if (stepsPerSec >  _maxSpeed) stepsPerSec =  _maxSpeed;
+  if (stepsPerSec < -_maxSpeed) stepsPerSec = -_maxSpeed;
+
+  if (fabsf(stepsPerSec) < kVelEpsilon) {
     stop(false);
     return;
   }
 
-  enable();
+  doEnable();
 
-  float    magnitude = fabsf(stepsPerSecond);
-  uint32_t interval  = intervalFromSpeed(magnitude);
-  int8_t   direction = (stepsPerSecond > 0.0f) ? 1 : -1;
+  int8_t   dir    = (stepsPerSec > 0.0f) ? 1 : -1;
+  uint32_t newTps = speedToTps(fabsf(stepsPerSec));
 
   noInterrupts();
-  bool start = !_running || (_mode != static_cast<uint8_t>(Mode::Velocity));
-  _mode      = static_cast<uint8_t>(Mode::Velocity);
-  _commandVelocity = stepsPerSecond;
-  _stepIntervalUs  = interval;
-  _running         = true;
-  if (start) {
-    _stepPinIsHigh           = false;
-    _currentSpeedStepsPerSec = 0.0f;
+  const bool wasIdle = (_mode == Mode::Idle);
+  _cmdVelocity = stepsPerSec;
+  _targetTps   = newTps;
+  _mode        = Mode::Velocity;
+  applyDir(dir);
+
+  if (wasIdle) {
+    // Starting from rest: schedule the first step using the Austin first-step
+    // formula c₀ = √(2/a) × kStepTimerHz.  Fall back to the target interval
+    // when acceleration is disabled.
+    _tps     = kTpsStop; // will be updated on the first falling edge
+    _pulseCnt = 0;
+    _counter  = (_accel > 0.0f)
+                  ? (uint32_t)((float)kStepTimerHz * sqrtf(2.0f / _accel))
+                  : newTps;
   }
-  applyDirection(direction);
+  // If already running: tick() will ramp _tps toward _targetTps naturally.
+  interrupts();
+}
+
+void Stepper::commandPosition(int32_t target, float maxSpeed) {
+  if (maxSpeed <= 0.0f || maxSpeed > _maxSpeed) maxSpeed = _maxSpeed;
+
+  int32_t cur;
+  noInterrupts();
+  cur = _position;
   interrupts();
 
-  if (start) { primeTimer(kPrimeDelayUs); }
-}
-
-uint32_t Stepper::intervalFromSpeed(float stepsPerSecond) const {
-  if (stepsPerSecond < 1.0f) stepsPerSecond = 1.0f;
-  float interval = 1000000.0f / stepsPerSecond;
-  float minUs    = static_cast<float>(kStepPulseWidthUs + 1);
-  if (interval < minUs) interval = minUs;
-  return static_cast<uint32_t>(interval);
-}
-
-void Stepper::applyDirection(int8_t dir) {
-  _directionSign = (dir >= 0) ? 1 : -1;
-  bool dirHigh   = (_directionSign > 0);
-  digitalWrite(_dirPin, _invertDir ? !dirHigh : dirHigh);
-}
-
-void Stepper::primeTimer(uint32_t periodUs) {
-  if (periodUs == 0) periodUs = 1;
-  _timer->pause();
-  _timer->setCount(0);
-  _timer->setOverflow(periodUs, MICROSEC_FORMAT);
-  _timer->refresh();
-  _timer->resume();
-}
-
-void Stepper::hardStopFromISR() {
-  _running                 = false;
-  _mode                    = static_cast<uint8_t>(Mode::Idle);
-  _commandVelocity         = 0.0f;
-  _targetPosition          = _currentPosition;
-  _stepPinIsHigh           = false;
-  _currentSpeedStepsPerSec = 0.0f;
-  _timer->pause();
-  digitalWrite(_stepPin, LOW);
-}
-
-void Stepper::handleTimerInterrupt() {
-  if (!_running) {
-    _timer->pause();
-    digitalWrite(_stepPin, LOW);
-    _stepPinIsHigh = false;
+  const int32_t delta = target - cur;
+  if (delta == 0) {
+    stop(false);
     return;
   }
 
-  if (!_stepPinIsHigh) {
-    // Rising edge: assert step pulse
+  doEnable();
+
+  const int8_t   dir    = (delta > 0) ? 1 : -1;
+  const uint32_t newTps = speedToTps(maxSpeed);
+
+  noInterrupts();
+  const bool wasIdle = (_mode == Mode::Idle);
+  _cmdVelocity = maxSpeed * (float)dir;
+  _target      = target;
+  _targetTps   = newTps;
+  _mode        = Mode::Position;
+  applyDir(dir);
+
+  if (wasIdle) {
+    _tps      = kTpsStop;
+    _pulseCnt = 0;
+    _counter  = (_accel > 0.0f)
+                  ? (uint32_t)((float)kStepTimerHz * sqrtf(2.0f / _accel))
+                  : newTps;
+  }
+  interrupts();
+}
+
+void Stepper::commandRelative(int32_t delta, float maxSpeed) {
+  int32_t cur;
+  noInterrupts();
+  cur = _position;
+  interrupts();
+  commandPosition(cur + delta, maxSpeed);
+}
+
+void Stepper::stop(bool disableDriver) {
+  noInterrupts();
+  _mode        = Mode::Idle;
+  _cmdVelocity = 0.0f;
+  _target      = _position;
+  _tps         = kTpsStop;
+  _targetTps   = kTpsStop;
+  _speedSps    = 0.0f;
+  _pulseCnt    = 0;
+  _counter     = kTpsStop;
+  interrupts();
+
+  digitalWrite(_stepPin, LOW);
+  if (disableDriver) digitalWrite(_enablePin, HIGH);
+}
+
+// ── ISR tick ─────────────────────────────────────────────────────────────────
+// Called at kStepTimerHz.  Keep this fast: integer ops on every call,
+// float only on the (infrequent) step falling-edge event.
+
+void Stepper::tick() {
+  if (_mode == Mode::Idle) return;
+
+  // ── Falling-edge phase: STEP pin is still HIGH ──────────────────────────
+  if (_pulseCnt > 0) {
+    if (--_pulseCnt == 0) {
+      digitalWrite(_stepPin, LOW);
+      _position += _dir;
+
+      // Position mode: check arrival.
+      if (_mode == Mode::Position) {
+        if (_position == _target) {
+          _mode        = Mode::Idle;
+          _cmdVelocity = 0.0f;
+          _speedSps    = 0.0f;
+          _tps         = kTpsStop;
+          return;
+        }
+        // Correct direction if we somehow overshot.
+        const int32_t rem  = _target - _position;
+        const int8_t  want = (rem > 0) ? 1 : -1;
+        if (want != _dir) applyDir(want);
+      }
+
+      // ── Velocity ramp (float – runs once per step, not once per tick) ────
+      const float v_cur = _speedSps;  // exact float, not re-derived from _tps
+      float v_tgt = (float)kStepTimerHz / (float)_targetTps;
+
+      // Position-mode deceleration look-ahead:
+      // Reduce v_tgt so the motor brakes to a stop exactly at _target.
+      if (_mode == Mode::Position && _accelISR > 0.0f) {
+        const int32_t rem        = abs(_target - _position);
+        const float   decelSteps = (v_cur * v_cur) / (2.0f * _accelISR);
+        if ((float)rem <= decelSteps) {
+          const float v_brake = sqrtf(2.0f * _accelISR * (float)rem);
+          if (v_brake < v_tgt) v_tgt = v_brake;
+        }
+      }
+
+      // Ramp current speed toward v_tgt.
+      float v;
+      if (_accelISR > 0.0f) {
+        // Δv = a × Δt ≈ a / v_cur (time per step ≈ 1 / v_cur).
+        // At rest (v_cur ≈ 0) use the Austin/Eiderman first-step formula:
+        //   c₀ = √(2/a) · kStepTimerHz  →  Δv = √(2a).
+        const float dv   = (v_cur <= kVelEpsilon) ? sqrtf(2.0f * _accelISR)
+                                                   : (_accelISR / v_cur);
+        const float diff = v_tgt - v_cur;
+        v = v_cur + (fabsf(diff) <= dv ? diff : copysignf(dv, diff));
+      } else {
+        v = v_tgt; // No ramp: instant speed change.
+      }
+
+      if (v < kVelEpsilon) {
+        // Fully decelerated to a stop.
+        _mode        = Mode::Idle;
+        _cmdVelocity = 0.0f;
+        _speedSps    = 0.0f;
+        _tps         = kTpsStop;
+        return;
+      }
+
+      _speedSps = v;
+      _tps = (uint32_t)((float)kStepTimerHz / v);
+
+      // Schedule the next rising edge.  Subtract the pulse width already
+      // "spent" so the total period (rising-to-rising) equals _tps ticks.
+      // The 1-tick minimum is a safety net; speedToTps() already enforces
+      // _tps >= kPulseTicks + 1 for all normally commanded speeds.
+      _counter = (_tps > kPulseTicks) ? (_tps - kPulseTicks) : 1u;
+    }
+    return; // Pin still HIGH – nothing else to do this tick.
+  }
+
+  // ── Countdown phase: waiting for the next rising edge ───────────────────
+  if (--_counter == 0) {
+    // Velocity mode: bail out if a stop was requested between steps.
+    if (_mode == Mode::Velocity && fabsf(_cmdVelocity) < kVelEpsilon) {
+      _mode = Mode::Idle;
+      return;
+    }
+
     digitalWrite(_stepPin, HIGH);
-    _stepPinIsHigh = true;
-    primeTimer(kStepPulseWidthUs);
-    return;
+    _pulseCnt = kPulseTicks;
   }
-
-  // Falling edge: step pulse complete — count the step
-  digitalWrite(_stepPin, LOW);
-  _stepPinIsHigh = false;
-  _currentPosition += _directionSign;
-
-  // --- Mode-specific position / direction checks ---
-  if (_mode == static_cast<uint8_t>(Mode::Position)) {
-    if (_currentPosition == _targetPosition) {
-      hardStopFromISR();
-      return;
-    }
-    int32_t remaining = _targetPosition - _currentPosition;
-    int8_t  desired   = (remaining > 0) ? 1 : -1;
-    if (desired != _directionSign) { applyDirection(desired); }
-
-  } else if (_mode == static_cast<uint8_t>(Mode::Velocity)) {
-    float commanded = _commandVelocity;
-    if (fabsf(commanded) < kSpeedEpsilon) {
-      hardStopFromISR();
-      return;
-    }
-    int8_t desired = (commanded > 0.0f) ? 1 : -1;
-    if (desired != _directionSign) { applyDirection(desired); }
-
-  } else {
-    hardStopFromISR();
-    return;
-  }
-
-  // --- Compute the commanded (target) speed magnitude ---
-  float cmdSpeed = fabsf(_commandVelocity);
-
-  // For position mode: apply deceleration look-ahead so we arrive at the
-  // target position with zero velocity instead of slamming into it.
-  if (_mode == static_cast<uint8_t>(Mode::Position) && _acceleration > 0.0f) {
-    int32_t remaining  = abs(_targetPosition - _currentPosition);
-    float   v          = _currentSpeedStepsPerSec;
-    // Distance (in steps) needed to brake from v to 0 at _acceleration.
-    float   decelSteps = (v * v) / (2.0f * _acceleration);
-    if (static_cast<float>(remaining) <= decelSteps) {
-      // Target speed that brings us to a stop exactly at the target.
-      float decelV = sqrtf(2.0f * _acceleration * static_cast<float>(remaining));
-      if (decelV < cmdSpeed) { cmdSpeed = decelV; }
-    }
-  }
-
-  // --- Acceleration ramp: smoothly move current speed toward cmdSpeed ---
-  float v = _currentSpeedStepsPerSec;
-  if (_acceleration > 0.0f) {
-    float dv;
-    if (v < 1.0f) {
-      // Starting from rest: first-step speed using Austin/Eiderman formula.
-      // This corresponds to the time needed to travel 1 step from rest.
-      dv = sqrtf(2.0f * _acceleration);
-    } else {
-      // Normal operation: dv = a * dt, where dt ≈ 1/v (seconds per step).
-      dv = _acceleration / v;
-    }
-    float diff = cmdSpeed - v;
-    v += (fabsf(diff) <= dv) ? diff : (diff > 0.0f ? dv : -dv);
-  } else {
-    // No ramp configured: instant speed change (legacy behaviour).
-    v = cmdSpeed;
-  }
-
-  // If the ramp has brought us to a full stop, finish.
-  if (v < kSpeedEpsilon) {
-    hardStopFromISR();
-    return;
-  }
-
-  _currentSpeedStepsPerSec = v;
-
-  // Schedule the off-time before the next rising edge.
-  uint32_t nextIntervalUs = static_cast<uint32_t>(1e6f / v);
-  uint32_t offTime        = (nextIntervalUs > kStepPulseWidthUs)
-                               ? (nextIntervalUs - kStepPulseWidthUs)
-                               : kMinOffTimeUs;
-  primeTimer(offTime);
 }
