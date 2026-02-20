@@ -33,7 +33,16 @@ void stepISR() {
   stepper_l.tick();
 }
 
-// Fast control loop – ~83 Hz (12 ms).
+// Flag set by TIM1 ISR; the actual work runs in loop() so the heavy I2C
+// and control-math never block the 200 kHz step timer.
+volatile bool controlLoopReady = false;
+
+// TIM1 ISR – just raises the flag; keeps ISR < 1 µs.
+void fastLoopISR() {
+  controlLoopReady = true;
+}
+
+// Actual control-loop work (called from loop()).
 void fastLoop() {
   imu.update();
   drivetrain.update();
@@ -63,7 +72,11 @@ void setup() {
   stepTimer.setOverflow(5, MICROSEC_FORMAT); // 5 µs → 200 kHz tick rate
   stepTimer.attachInterrupt(stepISR);
   stepTimer.resume();
-  Serial1.println("[INIT] Step timer running at 200 kHz");
+
+  // Give the step timer the highest NVIC priority so it is never delayed
+  // by the control-loop timer or any other interrupt.
+  HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0);
+  Serial1.println("[INIT] Step timer running at 200 kHz (priority 0)");
 
   // ── IMU ─────────────────────────────────────────────────────────────────
   for (int attempt = 0; attempt < 4; ++attempt) {
@@ -76,10 +89,15 @@ void setup() {
   }
 
   // ── Fast control-loop timer ─────────────────────────────────────────────
+  // The ISR only sets a flag; the heavy work (I2C + math) runs in loop()
+  // so it cannot block the 200 kHz step timer.
   fastLoopTimer.setOverflow(12000, MICROSEC_FORMAT); // 12 ms = ~83 Hz
-  fastLoopTimer.attachInterrupt(fastLoop);
+  fastLoopTimer.attachInterrupt(fastLoopISR);
   fastLoopTimer.resume();
-  Serial1.println("[INIT] Control loop running at ~83 Hz");
+
+  // Control-loop timer needs a lower priority than the step timer.
+  HAL_NVIC_SetPriority(TIM1_UP_IRQn, 6, 0);
+  Serial1.println("[INIT] Control loop running at ~83 Hz (priority 6)");
 
   Serial1.println("[INIT] All systems ready");
   delay(200);
@@ -106,6 +124,13 @@ void setup() {
 // ---------------------------------------------------------------------------
 
 void loop() {
+  // ── Control loop – runs at ~83 Hz, driven by TIM1 flag ────────────────
+  if (controlLoopReady) {
+    controlLoopReady = false;
+    fastLoop();
+  }
+
+  // ── Debug output at 10 Hz ─────────────────────────────────────────────
   static uint32_t lastPrintMs = 0;
   const  uint32_t now         = millis();
 

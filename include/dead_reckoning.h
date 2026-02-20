@@ -47,6 +47,7 @@ public:
   void stop();         // Clears queue and stops motors
   void update();       // Call this in your main loop
   bool isBusy() const; // Returns true if executing or queue not empty
+  std::size_t getQueueCount() const { return _queueCount; }
 
   // Get current heading from IMU (radians)
   float getHeading() const;
