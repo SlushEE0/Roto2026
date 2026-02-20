@@ -10,9 +10,7 @@
 // ---------------------------------------------------------------------------
 
 // Both motors share one hardware timer running at kStepTimerHz (200 kHz).
-// Using TIM2 keeps TIM1 free for the fast control-loop timer below.
 HardwareTimer stepTimer(TIM2);
-HardwareTimer fastLoopTimer(TIM1);
 
 // Steppers – pins from config.h.
 // invertDir=true  for the right motor so that positive velocity = forward.
@@ -31,21 +29,6 @@ DeadReckoningDrivetrain drivetrain(stepper_l, stepper_r, &imu);
 void stepISR() {
   stepper_r.tick();
   stepper_l.tick();
-}
-
-// Flag set by TIM1 ISR; the actual work runs in loop() so the heavy I2C
-// and control-math never block the 200 kHz step timer.
-volatile bool controlLoopReady = false;
-
-// TIM1 ISR – just raises the flag; keeps ISR < 1 µs.
-void fastLoopISR() {
-  controlLoopReady = true;
-}
-
-// Actual control-loop work (called from loop()).
-void fastLoop() {
-  imu.update();
-  drivetrain.update();
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +57,7 @@ void setup() {
   stepTimer.resume();
 
   // Give the step timer the highest NVIC priority so it is never delayed
-  // by the control-loop timer or any other interrupt.
+  // by any other interrupt.
   HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0);
   Serial1.println("[INIT] Step timer running at 200 kHz (priority 0)");
 
@@ -87,17 +70,6 @@ void setup() {
     Serial1.println("[INIT] BNO085 retry...");
     delay(500);
   }
-
-  // ── Fast control-loop timer ─────────────────────────────────────────────
-  // The ISR only sets a flag; the heavy work (I2C + math) runs in loop()
-  // so it cannot block the 200 kHz step timer.
-  fastLoopTimer.setOverflow(12000, MICROSEC_FORMAT); // 12 ms = ~83 Hz
-  fastLoopTimer.attachInterrupt(fastLoopISR);
-  fastLoopTimer.resume();
-
-  // Control-loop timer needs a lower priority than the step timer.
-  HAL_NVIC_SetPriority(TIM1_UP_IRQn, 6, 0);
-  Serial1.println("[INIT] Control loop running at ~83 Hz (priority 6)");
 
   Serial1.println("[INIT] All systems ready");
   delay(200);
@@ -119,16 +91,13 @@ void setup() {
 }
 
 // ---------------------------------------------------------------------------
-// loop – runs at whatever rate the scheduler allows (~kHz).
-// Print debug info at 10 Hz so it doesn't flood the serial port.
+// loop – IMU + drivetrain update every iteration; debug print at 10 Hz.
 // ---------------------------------------------------------------------------
 
 void loop() {
-  // ── Control loop – runs at ~83 Hz, driven by TIM1 flag ────────────────
-  if (controlLoopReady) {
-    controlLoopReady = false;
-    fastLoop();
-  }
+  // ── Control loop – runs every iteration of loop() ─────────────────────
+  imu.update();
+  drivetrain.update();
 
   // ── Debug output at 10 Hz ─────────────────────────────────────────────
   static uint32_t lastPrintMs = 0;
@@ -146,5 +115,34 @@ void loop() {
     Serial1.print(" sps  R:");
     Serial1.print(stepper_r.currentSpeed(), 0);
     Serial1.println(" sps");
+
+    // IMU data
+    Rotation *rot = imu.getRotation();
+    GyroData  g   = imu.getGyroData();
+    AccelData a   = imu.getAccelData();
+
+    Serial1.print("  IMU Yaw:");
+    Serial1.print(rot->getYawDegs(), 1);
+    Serial1.print(" Pitch:");
+    Serial1.print(rot->getPitchDegs(), 1);
+    Serial1.print(" Roll:");
+    Serial1.print(rot->getRollDegs(), 1);
+    Serial1.println(" deg");
+
+    Serial1.print("  Gyro X:");
+    Serial1.print(g.x, 3);
+    Serial1.print(" Y:");
+    Serial1.print(g.y, 3);
+    Serial1.print(" Z:");
+    Serial1.print(g.z, 3);
+    Serial1.println(" rad/s");
+
+    Serial1.print("  Accel X:");
+    Serial1.print(a.x, 2);
+    Serial1.print(" Y:");
+    Serial1.print(a.y, 2);
+    Serial1.print(" Z:");
+    Serial1.print(a.z, 2);
+    Serial1.println(" m/s2");
   }
 }
