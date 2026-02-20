@@ -1,127 +1,125 @@
 #include <Arduino.h>
-#include <bno.h>
-#include <drivetrain.h>
-#include <odometry.h>
-#include <stepper.h>
-#include <utils.h>
 
 #include <config.h>
 #include <dead_reckoning.h>
+#include <stepper.h>
+#include <bno.h>
 
+// ---------------------------------------------------------------------------
+// Hardware objects
+// ---------------------------------------------------------------------------
+
+// Both motors share one hardware timer running at kStepTimerHz (200 kHz).
+// Using TIM2 keeps TIM1 free for the fast control-loop timer below.
+HardwareTimer stepTimer(TIM2);
 HardwareTimer fastLoopTimer(TIM1);
 
-HardwareTimer stepperTimerR(TIM2);
-HardwareTimer stepperTimerL(TIM3);
+// Steppers – pins from config.h.
+// invertDir=true  for the right motor so that positive velocity = forward.
+Stepper stepper_r(X_STEP_PIN,  X_DIR_PIN,  X_ENABLE_PIN, /*invertDir=*/true);
+Stepper stepper_l(E0_STEP_PIN, E0_DIR_PIN, E0_ENABLE_PIN, /*invertDir=*/false);
 
 BNO imu;
 
-Stepper stepper_r(&stepperTimerR, X_STEP_PIN, X_DIR_PIN, X_ENABLE_PIN, true);
-Stepper
-  stepper_l(&stepperTimerL, E0_STEP_PIN, E0_DIR_PIN, E0_ENABLE_PIN, false);
-
-Odometry odometry;
-// DifferentialDrive drivetrain(stepper_l, stepper_r, &odometry, &imu);
-
-// switch to dead reckoning drivetrain bc diffydrive does not work
 DeadReckoningDrivetrain drivetrain(stepper_l, stepper_r, &imu);
 
+// ---------------------------------------------------------------------------
+// Callbacks
+// ---------------------------------------------------------------------------
+
+// Step ISR – called at 200 kHz.  Tick both motors; order doesn't matter.
+void stepISR() {
+  stepper_r.tick();
+  stepper_l.tick();
+}
+
+// Fast control loop – ~83 Hz (12 ms).
 void fastLoop() {
   imu.update();
   drivetrain.update();
 }
 
+// ---------------------------------------------------------------------------
+// setup
+// ---------------------------------------------------------------------------
+
 void setup() {
   Serial1.begin(250000);
-  while (!Serial1)
-    ;
+  while (!Serial1);
 
-  Serial1.println("[INIT] Roto2026 Starting");
-  Serial1.println("========================");
+  Serial1.println("[INIT] Roto2026 starting");
+  Serial1.println("=========================");
 
-  stepper_r.begin(1000000UL);
-  stepper_l.begin(1000000UL);
+  // ── Stepper pin init ────────────────────────────────────────────────────
+  stepper_r.begin();
+  stepper_l.begin();
   stepper_r.setMaxSpeed(MOTOR_MAX_SPEED);
   stepper_l.setMaxSpeed(MOTOR_MAX_SPEED);
+  stepper_r.setAcceleration(MOTOR_MAX_ACCEL);
+  stepper_l.setAcceleration(MOTOR_MAX_ACCEL);
 
-  for (int i = 0; i < 4; i++) {
+  // ── Shared step timer ───────────────────────────────────────────────────
+  // One timer, one ISR, both motors.  No per-motor timer reprogramming.
+  stepTimer.setOverflow(5, MICROSEC_FORMAT); // 5 µs → 200 kHz tick rate
+  stepTimer.attachInterrupt(stepISR);
+  stepTimer.resume();
+  Serial1.println("[INIT] Step timer running at 200 kHz");
+
+  // ── IMU ─────────────────────────────────────────────────────────────────
+  for (int attempt = 0; attempt < 4; ++attempt) {
     if (imu.connect(BNO_SDA_PIN, BNO_SCL_PIN, BNO_INT_PIN, BNO_RST_PIN)) {
-      Serial1.println("[INIT] Connected to BNO085");
+      Serial1.println("[INIT] BNO085 connected");
       break;
     }
-    Serial1.println("[INIT] Retrying BNO connection...");
+    Serial1.println("[INIT] BNO085 retry...");
     delay(500);
   }
 
-  Serial1.println("[INIT] Setting up fast loop");
-
-  fastLoopTimer.setOverflow(12000, MICROSEC_FORMAT); // 12 ms
+  // ── Fast control-loop timer ─────────────────────────────────────────────
+  fastLoopTimer.setOverflow(12000, MICROSEC_FORMAT); // 12 ms = ~83 Hz
   fastLoopTimer.attachInterrupt(fastLoop);
   fastLoopTimer.resume();
+  Serial1.println("[INIT] Control loop running at ~83 Hz");
 
   Serial1.println("[INIT] All systems ready");
   delay(200);
 
-  // drivetrain.resetPose();
-
-  // Example: Move to absolute poses using EKF odometry feedback
-  // queueMoveToPose(targetPose, linearSpeed_cm/s, turnSpeed_deg/s)
-  // drivetrain.queueMoveToPose(
-  //   Pose(34.0f, 0.0f, Rotation(0, 0, 90.0f)), 60.0f, 120.0f); // Forward 34 cm
-  // drivetrain.queueMoveToPose(Pose(34.0f, 48.0f, Rotation::kZero()),
-  //                            60.0f,
-  //                            120.0f); // Left 48 cm (90° turn + drive)
-  // drivetrain.queueMoveToPose(
-  //   Pose(130.0f, 48.0f, Rotation::kZero()), 60.0f, 120.0f); // Forward 96 cm
-  // drivetrain.queueMoveToPose(
-  //   Pose(250.0f, -50.0f, Rotation::kZero()), 60.0f, 120.0f); // Diagonal move
-
+  // ── Queue a simple demo path ─────────────────────────────────────────────
+  // Speeds: linear in cm/s, angular in deg/s.
   drivetrain.queueDriveStraight(100.0f, 60.0f); // Forward 100 cm
-  drivetrain.queueTurn(90.0f, 90.0f);            // Turn 90 degrees
-  drivetrain.queueDriveStraight(50.0f, 60.0f);  // Forward 50 cm
-  drivetrain.queueTurn(-90.0f, 90.0f);          // Turn -90 degrees
-  drivetrain.queueDriveStraight(100.0f, 60.0f); // Forward 100 cm
-  drivetrain.queueTurn(180.0f, 90.0f);          // Turn 180 degrees
-  drivetrain.queueDriveStraight(150.0f, 60.0f); // Forward 150 cm
-  drivetrain.queueTurn(-90.0f, 90.0f);          // Turn -90 degrees
-  drivetrain.queueDriveStraight(75.0f, 60.0f);  // Forward 75 cm
-  drivetrain.queueTurn(-90.0f, 90.0f);          // Turn -90 degrees
-  drivetrain.queueDriveStraight(50.0f, 60.0f);  // Forward 50 cm
-  drivetrain.queueTurn(90.0f, 90.0f);           // Turn 90 degrees
+  drivetrain.queueTurn(90.0f,  90.0f);           // Right 90°
+  drivetrain.queueDriveStraight(50.0f,  60.0f);  // Forward 50 cm
+  drivetrain.queueTurn(-90.0f, 90.0f);           // Left 90°
+  drivetrain.queueDriveStraight(100.0f, 60.0f);  // Forward 100 cm
+  drivetrain.queueTurn(180.0f, 90.0f);           // U-turn
+  drivetrain.queueDriveStraight(150.0f, 60.0f);  // Forward 150 cm
+  drivetrain.queueTurn(-90.0f, 90.0f);
+  drivetrain.queueDriveStraight(75.0f,  60.0f);
+  drivetrain.queueTurn(-90.0f, 90.0f);
+  drivetrain.queueDriveStraight(50.0f,  60.0f);
+  drivetrain.queueTurn(90.0f,  90.0f);
 }
 
+// ---------------------------------------------------------------------------
+// loop – runs at whatever rate the scheduler allows (~kHz).
+// Print debug info at 10 Hz so it doesn't flood the serial port.
+// ---------------------------------------------------------------------------
+
 void loop() {
-  // Pose pose = drivetrain.getPose();
-  // Serial1.print("Pose X:");
-  // Serial1.print(pose.x, 2);
-  // Serial1.print(", Y:");
-  // Serial1.print(pose.y, 2);
-  // Serial1.print(", Yaw:");
-  // Serial1.print(pose.rot.getYawDegs(), 2);
-  // Serial1.print(" deg | Busy:");
-  // Serial1.print(drivetrain.isBusy() ? "YES" : "NO");
+  static uint32_t lastPrintMs = 0;
+  const  uint32_t now         = millis();
 
-  // // Print drivetrain state
-  // Serial1.print(" | Exec:");
-  // Serial1.print(drivetrain.isExecuting() ? "YES" : "NO");
-  // Serial1.print(" | Cmd:");
-  // switch (drivetrain.getCurrentCommandType()) {
-  //   case DrivetrainCommandType::Idle:
-  //     Serial1.print("Idle");
-  //     break;
-  //   case DrivetrainCommandType::TurnDegrees:
-  //     Serial1.print("Turn");
-  //     break;
-  //   case DrivetrainCommandType::MoveToPose:
-  //     Serial1.print("MoveToPose");
-  //     break;
-  //   case DrivetrainCommandType::FollowTrajectory:
-  //     Serial1.print("FollowTraj");
-  //     break;
-  // }
-  // Serial1.print(" | SubState:");
-  // Serial1.print(drivetrain.getSubStateName());
-  // Serial1.print(" | Queue:");
-  // Serial1.println(drivetrain.getQueueCount());
+  if (now - lastPrintMs >= 100) {
+    lastPrintMs = now;
 
-  // delay(30);
+    Serial1.print("Busy:");
+    Serial1.print(drivetrain.isBusy() ? "Y " : "N ");
+    Serial1.print("Queue:");
+    Serial1.print(drivetrain.getQueueCount());
+    Serial1.print("  L:");
+    Serial1.print(stepper_l.currentSpeed(), 0);
+    Serial1.print(" sps  R:");
+    Serial1.print(stepper_r.currentSpeed(), 0);
+    Serial1.println(" sps");
+  }
 }

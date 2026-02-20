@@ -1,89 +1,129 @@
 #pragma once
 
 #include <Arduino.h>
-#include <HardwareTimer.h>
 #include <math.h>
 
+// ---------------------------------------------------------------------------
+// Stepper – fixed-rate tick-driven step generator
+//
+// A single HardwareTimer (configured in main.cpp) fires an ISR at
+// kStepTimerHz.  User code calls Stepper::tick() for every motor from
+// that ISR.  Step timing uses an integer countdown; floating-point ramp
+// arithmetic only runs once per step event (≤ kStepTimerHz/2 per second
+// per motor), never on every timer tick.
+//
+// Why a fixed-rate timer instead of a variable-period one?
+//   Reprogramming a timer's ARR/PSC registers inside an ISR (the old
+//   approach) introduces hardware-pipeline jitter and is fragile at high
+//   step rates.  A fixed tick removes all of that; both motors share the
+//   same hardware timer and have deterministic, jitter-free step pulses.
+//
+// Hardware wiring (A4988 / compatible):
+//   STEP – rising edge advances one micro-step
+//   DIR  – HIGH = positive direction (invertDir flag flips this)
+//   EN   – active-LOW; HIGH turns the driver off
+// ---------------------------------------------------------------------------
+
+// Tick rate – must match the HardwareTimer period in main.cpp.
+// 200 kHz → 5 µs / tick.  Actual max step rate = kStepTimerHz / (kPulseTicks + 1)
+// ≈ 66.7 kHz, well above the A4988 practical limit of ~50 kHz.
+static constexpr uint32_t kStepTimerHz = 200000UL;
+
+// STEP pulse width in ticks.  2 × 5 µs = 10 µs.  A4988 needs only 1 µs minimum;
+// 10 µs gives a comfortable margin against propagation delays.
+static constexpr uint32_t kPulseTicks = 2;
+
 class Stepper {
-    public:
-  enum class Mode : uint8_t { Idle = 0, Position, Velocity };
+public:
+  enum class Mode : uint8_t { Idle = 0, Velocity, Position };
 
-  Stepper(HardwareTimer *timer,
-          uint8_t        stepPin,
-          uint8_t        dirPin,
-          uint8_t        enablePin,
-          bool           invertDir = false);
+  Stepper(uint8_t stepPin,
+          uint8_t dirPin,
+          uint8_t enablePin,
+          bool    invertDir = false);
 
-  void begin(uint32_t timerFreqHz = 2000000UL);
-  void enable();
-  void disable();
+  // ── Setup (call before starting the shared timer) ────────────────────────
+  void begin();
+
+  // ── Configuration ─────────────────────────────────────────────────────────
+  void setMaxSpeed(float stepsPerSec);
+  void setAcceleration(float stepsPerSec2); // 0 = instant (no ramp)
+
+  // ── Motion commands ───────────────────────────────────────────────────────
+  // Signed velocity; positive = positive direction.
+  void commandVelocity(float stepsPerSec);
+
+  // Absolute / relative position with optional speed cap (0 → use maxSpeed).
+  void commandPosition(int32_t target, float maxSpeed = 0.0f);
+  void commandRelative(int32_t delta,  float maxSpeed = 0.0f);
+
+  // Immediate hard stop; optionally disable the driver (removes holding torque).
   void stop(bool disableDriver = false);
 
-  void commandPosition(int32_t targetPosition, float speedStepsPerSec = 0.0f);
-  void commandRelative(int32_t stepDelta, float speedStepsPerSec = 0.0f);
-  void commandVelocity(float stepsPerSecond);
+  // ── State queries ──────────────────────────────────────────────────────────
+  Mode    mode()             const { return _mode; }
+  bool    isBusy()           const { return _mode != Mode::Idle; }
+  int32_t currentPosition()  const { return _position; }
+  float   currentSpeed()     const; // unsigned magnitude, steps/s
+  float   commandedVelocity()const { return _cmdVelocity; }
+  float   maxSpeed()         const { return _maxSpeed; }
+  float   acceleration()     const { return _accel; }
 
-  void moveTo(int32_t targetPosition) {
-    commandPosition(targetPosition, _maxSpeed);
-  }
-  void moveTo(int32_t targetPosition,
-              int32_t maxSpeedStepsPerSec,
-              int32_t /*accelStepsPerSec2*/) {
-    commandPosition(targetPosition,
-                    fabsf(static_cast<float>(maxSpeedStepsPerSec)));
-  }
-  void moveBy(int32_t stepDelta) { commandRelative(stepDelta, _maxSpeed); }
-  void moveBy(int32_t stepDelta,
-              int32_t maxSpeedStepsPerSec,
-              int32_t /*accelStepsPerSec2*/) {
-    commandRelative(stepDelta, fabsf(static_cast<float>(maxSpeedStepsPerSec)));
-  }
+  // ── Called from the shared HardwareTimer ISR – not for user code ──────────
+  void tick();
 
-  void setTarget(int32_t targetPosition) {
-    commandPosition(targetPosition, _maxSpeed);
-  }
-  void setMaxSpeed(float stepsPerSecond);
-  void setAcceleration(float stepsPerSecondSquared) {
-    _acceleration = stepsPerSecondSquared;
-  }
+private:
+  void     doEnable();
+  void     applyDir(int8_t dir);
+  uint32_t speedToTps(float stepsPerSec) const; // steps/s → ticks/step
 
-  Mode mode() const { return static_cast<Mode>(_mode); }
-  bool isBusy() const { return _running; }
-  bool isAtTarget() const {
-    return (_mode == static_cast<uint8_t>(Mode::Position)) &&
-           (_currentPosition == _targetPosition);
-  }
+  // Sentinel: "not moving / fully decelerated".
+  static constexpr uint32_t kTpsStop = 0x7FFFFFFFul;
 
-  int32_t currentPosition() const { return _currentPosition; }
-  int32_t targetPosition() const { return _targetPosition; }
-  float   currentSpeed() const { return fabsf(_commandVelocity); }
-  float   commandedVelocity() const { return _commandVelocity; }
-  float   maxSpeed() const { return _maxSpeed; }
-  float   acceleration() const { return _acceleration; }
+  // ── Pins ──────────────────────────────────────────────────────────────────
+  const uint8_t _stepPin;
+  const uint8_t _dirPin;
+  const uint8_t _enablePin;
+  const bool    _invertDir;
 
-    private:
-  void     handleTimerInterrupt();
-  void     applyDirection(int8_t dir);
-  void     primeTimer(uint32_t periodUs);
-  uint32_t intervalFromSpeed(float stepsPerSecond) const;
-  void     hardStopFromISR();
+  // ── Limits ────────────────────────────────────────────────────────────────
+  float _maxSpeed; // steps/s
+  float _accel;    // steps/s²
 
-  HardwareTimer *_timer;
-  uint8_t        _stepPin;
-  uint8_t        _dirPin;
-  uint8_t        _enablePin;
-  bool           _invertDir;
+  // ── ISR state (write with interrupts disabled, or only from tick()) ───────
 
-  volatile int32_t _currentPosition;
-  volatile int32_t _targetPosition;
+  volatile Mode _mode;
 
-  volatile float _commandVelocity; // signed steps/s
-  float          _maxSpeed;
-  float          _acceleration;
+  // Step counter – monotonically tracks physical position.
+  volatile int32_t _position;
 
-  volatile uint32_t _stepIntervalUs;
-  volatile bool     _running;
-  volatile bool     _stepPinIsHigh;
-  volatile int8_t   _directionSign;
-  volatile uint8_t  _mode;
+  // Absolute target (Position mode only).
+  volatile int32_t _target;
+
+  // Current speed as ticks-per-step.  Smaller = faster.  kTpsStop = stopped.
+  volatile uint32_t _tps;
+
+  // Target ticks-per-step set by the latest command.
+  volatile uint32_t _targetTps;
+
+  // Actual current speed in steps/s – updated every step event.
+  // Used for ramp math to avoid re-deriving from the quantized integer _tps,
+  // which would cause large deceleration errors at high step rates.
+  volatile float _speedSps;
+
+  // Mirror of _accel used inside tick() to avoid reading a non-volatile float.
+  volatile float _accelISR;
+
+  // Ticks remaining until the next rising edge.
+  volatile uint32_t _counter;
+
+  // Non-zero while STEP pin is HIGH; counts down to the falling edge.
+  volatile uint32_t _pulseCnt;
+
+  // Current step direction (+1 or -1).
+  volatile int8_t _dir;
+
+  // Signed commanded velocity – kept for commandedVelocity() and the
+  // near-zero check inside tick() for Velocity mode.
+  volatile float _cmdVelocity;
 };
