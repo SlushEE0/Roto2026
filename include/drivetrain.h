@@ -1,7 +1,6 @@
 #pragma once
 
 #include "bno.h"
-#include "odometry.h"
 #include "pid.h"
 #include "stepper.h"
 #include "utils.h"
@@ -12,118 +11,99 @@
 // Maximum number of commands in the queue
 static constexpr std::size_t kDrivetrainQueueSize = 16;
 
-struct Trajectory {
-  const Pose* points;
-  std::size_t count;
-};
+// ── Command types ──────────────────────────────────────────────────────────
+enum class CommandType { Idle, DriveStraight, Turn };
 
-// Command types
-enum class DrivetrainCommandType {
-  Idle,
-  TurnDegrees,
-  MoveToPose,
-  FollowTrajectory
-};
+struct DriveCommand {
+  CommandType type;
 
-// Unified command structure
-struct DrivetrainCommand {
-  DrivetrainCommandType type;
+  float distance;    // cm  (DriveStraight only)
+  float linearSpeed; // cm/s
+  float angleDeg;    // degrees (Turn only, positive = CCW)
+  float turnSpeed;   // deg/s
 
-  struct {
-    float degrees;
-    float speedDegPerSec;
-  } turn;
-  Pose targetPose;
-  float linearSpeed;
-  float turnSpeed;
-  struct {
-    const Pose* points;
-    std::size_t count;
-    float linearSpeed;
-    float turnSpeed;
-    std::size_t currentIndex; // To track progress within the trajectory
-  } trajectory;
-
-  DrivetrainCommand() : type(DrivetrainCommandType::Idle) {
-    turn = {0.0f, 0.0f};
-    targetPose = Pose();
-    trajectory = {nullptr, 0, 0.0f, 0.0f, 0};
+  DriveCommand()
+      : type(CommandType::Idle), distance(0), linearSpeed(0), angleDeg(0),
+        turnSpeed(0) {
   }
 };
 
+// ── DifferentialDrive ──────────────────────────────────────────────────────
+// Simple differential-drive controller.
+//   • DriveStraight: uses step counting for distance, IMU for heading hold.
+//   • Turn: uses IMU heading to rotate in place.
+//   • All commands go through a FIFO queue.
+//   • setTimeTarget() auto-calculates speeds for speed-less queued commands.
 class DifferentialDrive {
 public:
-  DifferentialDrive(Stepper& left,
-                    Stepper& right,
-                    Odometry* filter = nullptr,
-                    BNO* imu = nullptr);
+  DifferentialDrive(Stepper& left, Stepper& right, BNO* imu = nullptr);
 
-  void setFilter(Odometry* filter);
+  // ── Configuration ──────────────────────────────────────────────────────
   void setIMU(BNO* imu);
-  void setLinearPID(float kP, float kI, float kD);
-  void setAngularPID(float kP, float kI, float kD);
+  void setHeadingPID(float kP, float kI, float kD);
+  void setTurnPID(float kP, float kI, float kD);
 
-  void resetPose(const Pose& pose = Pose());
-  void stop(); // Clears queue and stops motors
-  void update();
+  // ── Control ────────────────────────────────────────────────────────────
+  void stop();   // Clear queue, stop motors
+  void update(); // Call every loop iteration
   bool isBusy() const;
-  Pose getPose() const;
-  float getHeading() const;
 
-  DrivetrainCommandType getCurrentCommandType() const {
-    return _activeCommand.type;
+  // ── State queries ──────────────────────────────────────────────────────
+  float getHeading() const; // radians, from IMU
+  std::size_t getQueueCount() const {
+    return _queueCount;
   }
   bool isExecuting() const {
     return _isExecuting;
   }
-  std::size_t getQueueCount() const {
-    return _queueCount;
-  }
-  const char* getSubStateName() const;
 
-  bool queueTurnDegrees(float degrees, float speedDegPerSec);
-  bool queueMoveToPose(const Pose& target, float linearSpeed, float turnSpeed);
-  bool queueFollowTrajectory(const Trajectory& traj,
-                             float linearSpeed,
-                             float turnSpeed);
+  // ── Queue commands (with explicit speeds) ──────────────────────────────
+  bool queueDriveStraight(float distanceCm, float speedCmPerSec);
+  bool queueTurnDegrees(float deg, float speedDegPerSec);
+
+  // ── Queue commands (speed-less, for use with setTimeTarget) ────────────
+  bool queueDrive(float distanceCm);
+  bool queueTurn(float deg);
+
+  // ── Time-target speed resolver ─────────────────────────────────────────
+  // After queuing speed-less commands, call this to auto-calculate speeds
+  // so the entire sequence completes in |totalSeconds|.
+  // Commands with explicit speeds have their estimated time subtracted
+  // from the budget first; the remainder is distributed to speed-less ones.
+  bool setTimeTarget(float totalSeconds);
 
 private:
   void processCommand();
-  void handleTurnDegrees();
-  void handleMoveToPose();
-  void handleFollowTrajectory();
+  void handleDriveStraight();
+  void handleTurn();
 
   void setWheelVelocities(float leftCmPerSec, float rightCmPerSec);
-  float normalizeAngle(float angle);
-  float degToRad(float deg);
-  float radToDeg(float rad);
+  float normalizeAngle(float angle) const;
+  float degToRad(float deg) const;
+  float radToDeg(float rad) const;
 
+  // Hardware
   Stepper& _left;
   Stepper& _right;
-  Odometry* _filter;
   BNO* _imu;
 
-  DrivetrainCommand _queue[kDrivetrainQueueSize];
+  // Queue
+  DriveCommand _queue[kDrivetrainQueueSize];
   std::size_t _queueHead;
   std::size_t _queueTail;
   std::size_t _queueCount;
 
-  DrivetrainCommand _activeCommand;
+  // Active command
+  DriveCommand _activeCommand;
   bool _isExecuting;
 
-  Pose _startPose;
+  // Motion state
   long _startLeftSteps;
   long _startRightSteps;
+  float _startHeading;
   float _targetHeading;
 
-  PIDController _linearPID;  // For distance control
-  PIDController _angularPID; // For heading/turning control
-
-  enum class SubState {
-    Init,
-    AlignToTarget,
-    DriveToTarget,
-    FinalAlign,
-    Done
-  } _subState;
+  // PID controllers
+  PIDController _headingPID; // heading correction while driving straight
+  PIDController _turnPID;    // turning in place
 };

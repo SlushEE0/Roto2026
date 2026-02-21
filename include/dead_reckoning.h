@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bno.h"
+#include "pid.h"
 #include "stepper.h"
 #include "utils.h"
 
@@ -56,6 +57,23 @@ public:
   bool queueDriveStraight(float distanceCm, float speedCmPerSec);
   bool queueTurn(float degrees, float speedDegPerSec);
 
+  // ── Ziegler-Nichols Turn Tuner ─────────────────────────────────────────
+  // Blocks while it runs.  Logs Ku, Tu and computed PID gains to Serial1.
+  // targetDeg   – amplitude of the test oscillation (e.g. 30°)
+  // maxSpeedDeg – speed cap during tuning (deg/s)
+  // startKp     – initial proportional gain to try
+  // kpStep      – how much to increase Kp each iteration
+  // maxKp       – safety cap
+  void runZieglerNicholsTurnTune(float targetDeg = 45.0f,
+                                 float maxSpeedDeg = 120.0f,
+                                 float startKp = 0.5f,
+                                 float kpStep = 0.25f,
+                                 float maxKp = 20.0f);
+
+  // Apply PID gains computed by the tuner (or manually chosen)
+  void setTurnPID(float kP, float kI, float kD);
+  const PIDController::Gains& getTurnPIDGains() const { return _turnPID.getGains(); }
+
 private:
   // Command handlers
   void processCommand();
@@ -90,5 +108,10 @@ private:
   float _targetHeading;
 
   float _headingGain;
-  float _turnGain;  
+  float _turnGain;
+
+  // PID turn controller (replaces bare P when tuned)
+  PIDController _turnPID;
+  bool _useTurnPID = false;
+  uint32_t _lastTurnUpdateMs = 0;
 };

@@ -48,8 +48,11 @@
 #define MICROSTEPS 16
 #define STEPS_PER_REV (200 * MICROSTEPS)
 
-#define DT_TRACK_WIDTH_CM 16
-#define WHEEL_DIAMETER_CM 7.3025
+// Effective track width, calibrated so commanded degrees match actual rotation.
+// Physical center-to-center is ~16.5 cm, but wheel scrub / contact geometry
+// makes the effective value larger.
+#define DT_TRACK_WIDTH_CM 16.5
+#define WHEEL_DIAMETER_CM 7.27
 
 #define MOTOR_MAX_ACCEL 36000 // steps/sec^2
 #define MOTOR_MAX_SPEED 20000 // steps/sec
