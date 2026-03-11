@@ -9,7 +9,7 @@
 #include <cstdint>
 
 // Maximum number of commands in the queue
-static constexpr std::size_t kDrivetrainQueueSize = 16;
+static constexpr std::size_t kDrivetrainQueueSize = 64;
 
 // ── Command types ──────────────────────────────────────────────────────────
 enum class CommandType { Idle, DriveStraight, Turn };

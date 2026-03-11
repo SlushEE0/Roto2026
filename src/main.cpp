@@ -70,14 +70,48 @@ void setup() {
   // ── Example: drive a square in 10 seconds ───────────────────────────────
   // Queue moves without specifying speeds, then let setTimeTarget calculate
   // the speeds needed to finish the whole sequence in the given time.
-  drivetrain.queueDrive(50.0f);    // forward 50 cm
-  drivetrain.queueTurn(107.0f);     // turn 90° left
-  drivetrain.queueDrive(50.0f);    // forward 50 cm
-  drivetrain.queueTurn(107.0f);     // turn 90° left
-  drivetrain.queueDrive(50.0f);    // forward 50 cm
-  drivetrain.queueTurn(107.0f);     // turn 90° left
-  drivetrain.setTimeTarget(20.0f); // complete everything in 20 seconds
-  drivetrain.queueDrive(50.0f);    // forward 50 cm
+  // drivetrain.queueTurnDegrees(107.0f, 60);
+
+  // ambitious
+  drivetrain.queueDrive(35.0f);
+  drivetrain.queueTurn(-107.0f);
+  drivetrain.queueDrive(100.0f);
+  drivetrain.queueDrive(-100.0f);
+  drivetrain.queueDrive(-50.0f);
+  drivetrain.queueTurn(107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueTurn(107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueDrive(-50.0f);
+  drivetrain.queueTurn(-107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueTurn(107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueTurn(-107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueTurn(-107.0f);
+  drivetrain.queueDrive(150.0f + 30.0f);
+  drivetrain.queueDrive(-30.0f);
+  drivetrain.queueTurn(-107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueTurn(107.0f);
+  drivetrain.queueDrive(50.0f);
+  drivetrain.queueTurn(107.0f);
+  drivetrain.queueDrive(50.0f);
+
+  //safe
+  // drivetrain.queueDrive(30.0f);
+  // drivetrain.queueDrive(150.0f);
+  // drivetrain.queueTurn(-107.0f);
+  // drivetrain.queueDrive(50.0f);
+  // drivetrain.queueTurn(-107.0f);
+  // drivetrain.queueDrive(50.0f);
+  // drivetrain.queueTurn(107.0f);
+  // drivetrain.queueDrive(50.0f);
+  // drivetrain.queueTurn(107.0f);
+  // drivetrain.queueDrive(50.0f);
+
+  drivetrain.setTimeTarget(43.0f);
 }
 
 void logData() {
